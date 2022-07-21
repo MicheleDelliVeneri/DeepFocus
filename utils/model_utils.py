@@ -27,6 +27,7 @@ import models.resnet as rn
 import models.blobsfinder as bf
 import models.deepgru as dg
 import matplotlib
+from astropy.io import fits
 from torch.utils.data import TensorDataset, DataLoader
 matplotlib.rcParams.update({'font.size': 12})
 # Ensure deterministic behavior
@@ -364,6 +365,7 @@ def test(model, test_loader, criterion, config, device):
                 xc = boxes[:, 1] + 0.5 * (boxes[:, 3] - boxes[:, 1])
                 yc = boxes[:, 0] + 0.5 * (boxes[:, 2] - boxes[:, 0])
                 dists = []
+                #dists = [[np.sqrt((txc[j] - xc[k])**2 + (tyc[j] - yc[k])**2 for k in range(len(xc))] for j in range(len(txc))]
                 for j in range(len(txc)):
                     d = []
                     for k in range(len(xc)):
@@ -488,3 +490,475 @@ def test(model, test_loader, criterion, config, device):
         mean, std = np.mean(res), np.std(res)
         wandb.log({'Mean Residual': mean, 'Standard Deviation': std})
         return tgs, pds, res
+
+def make(config, device):
+    output_dir = config['output_dir']
+    if not os.path.exists(output_dir):
+        os.mkdir(output_dir)
+    train_dir = config['data_folder'] + 'Train/'
+    valid_dir = config['data_folder'] + 'Validation/'
+    test_dir = config['data_folder'] + 'Test/'
+    if config['model'] == 'blobsfinder':
+        crop = ld.Crop(256)
+        rotate = ld.RandomRotate()
+        hflip = ld.RandomHorizontalFlip(p=1)
+        vflip = ld.RandomVerticalFlip(p=1)
+        norm_img = ld.NormalizeImage()
+        to_tensor = ld.ToTensor()
+        train_compose = transforms.Compose([rotate, vflip, hflip, crop, norm_img, to_tensor])
+        if config['mode'] == 'train':
+            print('Preparing Data for Blobs Finder Training and Testing...')
+            train_dataset = ld.ALMADataset('train_params.csv', train_dir, transform=train_compose)
+            valid_dataset = ld.ALMADataset('valid_params.csv', valid_dir, transform=train_compose)
+        
+            train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                              pin_memory=True, shuffle=True, collate_fn=train_dataset.collate_fn)
+            valid_loader = DataLoader(valid_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                              pin_memory=True, shuffle=True, collate_fn=valid_dataset.collate_fn)
+        else:
+            print("Preparing Data for Blobs Finder Testing....")
+        test_compose = transforms.Compose([crop, norm_img, to_tensor])
+        test_dataset = ld.ALMADataset('test_params.csv', test_dir, transform=test_compose)
+        test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                              pin_memory=True, shuffle=True, collate_fn=test_dataset.collate_fn)
+
+        model = bf.BlobsFinder(config['input_channels'], 
+                               config['blobsfinder_latent_channels'],
+                               config['encoder_output_channels'],
+                               config['activation_function'])
+    else:
+        if config['mode'] == 'train':
+            traindata = ld.PipelineDataLoader('train_params.csv', train_dir)
+            validdata = ld.PipelineDataLoader('valid_params.csv', valid_dir)
+            t_spectra, t_dspectra, t_focused, t_targets, t_line_images = traindata.create_dataset()
+            v_spectra, v_dspectra, v_focused, v_targets, v_line_images = validdata.create_dataset()
+
+        testddata = ld.PipelineDataLoader('test_params.csv', test_dir)
+        
+        te_spectra, te_dspectra, te_focused, te_targets, te_line_images = testddata.create_dataset()
+        if config['model'] == 'spectral':
+            if config['mode'] == 'train':
+                print('Preparing Data for Deep GRU Training and Testing...')
+                train_dataset = TensorDataset(torch.Tensor(t_dspectra), torch.Tensor(t_spectra))
+                train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                                  pin_memory=True, shuffle=True)
+                valid_dataset = TensorDataset(torch.Tensor(v_dspectra), torch.Tensor(v_spectra))
+                valid_loader = DataLoader(valid_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                                  pin_memory=True, shuffle=True)
+            else:
+                print("Preparing Data for Deep GRU Testing....")
+            test_dataset = TensorDataset(torch.Tensor(te_dspectra), torch.Tensor(te_spectra))
+            test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(),
+                                  pin_memory=True, shuffle=False)
+            model = dg.DeepGRU(config['input_channels'],
+                               config['deepgru_latent_channels'],
+                               config['output_channels'], 
+                               config['bidirectional'])
+        if config['model'] == 'resnet':
+            if config['mode'] == 'train':
+                print('Preparing Data for ResNet Training and Testing...')
+                if config['param'] == 'flux':
+                    train_dataset = TensorDataset(torch.Tensor(t_line_images), torch.Tensor(t_targets))
+                    valid_dataset = TensorDataset(torch.Tensor(v_line_images), torch.Tensor(v_targets))
+                else:
+                    train_dataset = TensorDataset(torch.Tensor(t_focused), torch.Tensor(t_targets))
+                    valid_dataset = TensorDataset(torch.Tensor(v_focused), torch.Tensor(v_targets))
+                train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                                  pin_memory=True, shuffle=True)
+                
+                valid_loader = DataLoader(valid_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                                  pin_memory=True, shuffle=True)
+            else:
+                print("Preparing Data for ResNet Testing...")
+            if config['param'] == 'flux':
+                test_dataset = TensorDataset(torch.Tensor(te_line_images), torch.Tensor(te_targets))
+            else:
+                test_dataset = TensorDataset(torch.Tensor(te_focused), torch.Tensor(te_targets))
+            test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(),
+                                  pin_memory=True, shuffle=False)
+            model = rn.ResNet18(config['input_channels'], config['output_channels'])
+    if torch.cuda.device_count() > 1 and config['multi_gpu']:
+        print(f'Using {torch.cuda.device_count()} GPUs')
+        model = nn.DataParallel(model)
+    print(f'Using {device}') 
+    model.to(device)
+    criterion_name = config['criterion']
+    if isinstance(criterion_name, list):
+        criterion = []
+        for crit in criterion_name:
+            if crit == 'l_1':
+                criterion.append(nn.L1Loss())
+            elif crit == 'l_2':
+                criterion.append(nn.MSELoss())
+            elif crit == 'ssim':
+                criterion.append(SSIMLoss(window_size=3))
+    else:
+        if criterion_name == 'l_1':
+            criterion = nn.L1Loss()
+        elif criterion_name == 'l_2':
+            criterion = nn.MSELoss()
+        elif criterion_name == 'ssim':
+            criterion = SSIMLoss(window_size=3) 
+    if config['optimizer'] == 'Adam':
+        optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'], 
+                                         weight_decay=config['weight_decay'])
+    elif config['optimizer'] == 'SGD':
+        optimizer = torch.optim.SGD(model.parameters(), lr=config['learning_rate'], 
+                                    momentum=0.9)
+    print('Selected the ' + config['optimizer'] + ' optimizer')
+    print('Selected the follwing loss function/s:')
+    print(criterion_name)
+    if config['mode'] == 'train':
+        return model, train_loader, valid_loader, test_loader,  criterion, optimizer
+    else:
+        print('Loading Checkpoint....')
+        outpath = os.sep.join((config['output_dir'], config['name'] + ".pt"))
+        model, _, _ = load_checkpoint(model, optimizer, outpath)
+        return model, test_loader, criterion, optimizer
+
+class Pipeline(object):
+
+    def __init__(self, hyperparameters, device):
+        output_dir = hyperparameters['output_dir']
+        if not os.path.exists(output_dir):
+            os.mkdir(output_dir)
+        if not os.path.exists(hyperparameters['plot_dir']):
+            os.mkdir(hyperparameters['plot_dir'])
+        if not os.path.exists(hyperparameters['prediction_dir']):
+            os.mkdir(hyperparameters['prediction_dir'])
+
+        self.train_dir = hyperparameters['data_folder'] + 'Train/'
+        self.valid_dir = hyperparameters['data_folder'] + 'Validation/'
+        self.test_dir = hyperparameters['data_folder'] + 'Test/'
+        crop = ld.Crop(256)
+        norm_img = ld.NormalizeImage()
+        to_tensor = ld.ToTensor()
+        self.test_compose = transforms.Compose([crop, norm_img, to_tensor])
+        self.device = device
+        self.hyperparameters = hyperparameters
+
+    def train_and_test_model(self):
+        if self.hyperparameters['mode'] == 'train':
+            with wandb.init(project=self.hyperparameters['project'],
+                             name=self.hyperparameters['name'], 
+                             entity=self.hyperparameters['entity'], 
+                             config=self.hyperparameters):
+                config = wandb.config
+                model, train_loader, valid_loader, test_loader, criterion, optimizer = make(config, self.test_dirdevice)
+                print('Training...')
+                model = train(model, train_loader, valid_loader, criterion, optimizer, config)
+                print('Testing...')
+                if config['model'] == 'resnet':
+                    tgs, pds, res = test(model, test_loader, criterion, config)
+                    truth_name = config['prediction_dir'] + "/" + config['param'] + '_' + config['name'] + '_targets.npy'
+                    prediction_name = config['prediction_dir'] + "/" + config['param'] + '_' + config['name'] + '_predictions.npy'
+                    residual_name = config['prediction_dir'] + "/" + config['param'] + '_' + config['name'] + '_residuals.npy'
+                    np.save(truth_name, tgs)
+                    np.save(prediction_name, pds)
+                    np.save(residual_name, res)
+
+                    fig = plt.figure(figsize=(8, 8))
+                    plt.hist(res, bins=50, edgecolor='black', color='dodgerblue')
+                    plt.xlabel(config['param'] + ' residuals')
+                    plt.ylabel('N')
+                    outhname = config['plot_dir'] + '/' + config['param'] + '_residuals.png'
+                    plt.savefig(outhname)
+                    wandb.log({"Residuals": fig})
+
+                    plt.figure(figsize=(8, 8))
+                    plt.scatter(tgs, pds, s=1, c='dodgerblue')
+                    y_lim = plt.ylim()
+                    x_lim = plt.xlim()
+                    plt.plot(x_lim, y_lim, color = 'r', linestyle='dashed')
+                    plt.xlabel('True ' + config['param'] )
+                    plt.ylabel('Prdicted ' + config['param'])
+                    outhname = config['plot_dir'] + '/' + config['param'] + '_scatter.png'
+                    plt.savefig(outhname)
+                    wandb.log({"Scatter": fig})
+                    return tgs, pds, res
+                if config['model'] == 'blobsfinder':
+                    tp, tot, fp, true_x, true_y, predicted_x, predicted_y = test(model, test_loader, criterion, config)
+                    truth_x_name = config['prediction_dir'] + "/x_" + config['name'] + '_targets.npy'
+                    truth_y_name = config['prediction_dir'] + "/y_"  + config['name'] + '_targets.npy'
+                    prediction_x_name = config['prediction_dir'] + "/x_" + config['name'] + '_prediction.npy'
+                    prediction_y_name = config['prediction_dir'] + "/y_"  + config['name'] + '_prediction.npy'
+                    np.save(truth_x_name, true_x)
+                    np.save(truth_y_name, true_y)
+                    np.save(prediction_x_name, predicted_x)
+                    np.save(prediction_y_name, predicted_y)
+                    return tp, tot, fp
+                if config['model'] == 'spectral':
+                    tp, tot, fp, true_z, true_extension, predicted_z, predicted_extension = test(model, test_loader, criterion, config)
+                    truth_z_name = config['prediction_dir'] + "/z_" + config['name'] + '_targets.npy'
+                    truth_extension_name = config['prediction_dir'] + "/z_extension_"  + config['name'] + '_targets.npy'
+                    prediction_z_name = config['prediction_dir'] + "/z_" + config['name'] + '_prediction.npy'
+                    prediction_extension_name = config['prediction_dir'] + "/z_extension_"  + config['name'] + '_prediction.npy'
+                    np.save(truth_z_name, true_z)
+                    np.save(truth_extension_name, true_extension)
+                    np.save(prediction_z_name, predicted_z)
+                    np.save(prediction_extension_name, predicted_extension)
+                    return tp, tot, fp
+        else:
+            with wandb.init(project=self.hyperparameters['project'],
+                             name=self.hyperparameters['name'] + '_Test', 
+                             entity=self.hyperparameters['entity'],
+                             config=self.hyperparameters, 
+                             ):
+                config = wandb.config
+                model, test_loader, criterion, optimizer = make(config, self.device)
+                print('Testing...')
+                if config['model'] == 'resnet':
+                    tgs, pds, res = test(model, test_loader, criterion, config)
+                    truth_name = config['prediction_dir'] + "/" + config['param'] + '_' + config['name'] + '_targets.npy'
+                    prediction_name = config['prediction_dir'] + "/" + config['param'] + '_' + config['name'] + '_predictions.npy'
+                    residual_name = config['prediction_dir'] + "/" + config['param'] + '_' + config['name'] + '_residuals.npy'
+                    np.save(truth_name, tgs)
+                    np.save(prediction_name, pds)
+                    np.save(residual_name, res)
+
+
+                    fig = plt.figure(figsize=(8, 8))
+                    plt.hist(res, bins=50, edgecolor='black', color='dodgerblue')
+                    plt.xlabel(config['param'] + ' residuals')
+                    plt.ylabel('N')
+                    outhname = config['plot_dir'] + '/' + config['param'] + '_residuals.png'
+                    plt.savefig(outhname)
+                    wandb.log({"Residuals": fig})
+
+                    plt.figure(figsize=(8, 8))
+                    plt.scatter(tgs, pds, s=1, c='dodgerblue')
+                    y_lim = plt.ylim()
+                    x_lim = plt.xlim()
+                    plt.plot(x_lim, y_lim, color = 'r', linestyle='dashed')
+                    plt.xlabel('True ' + config['param'] )
+                    plt.ylabel('Prdicted ' + config['param'])
+                    outhname = config['plot_dir'] + '/' + config['param'] + '_scatter.png'
+                    plt.savefig(outhname)
+                    wandb.log({"Scatter": fig})
+                if config['model'] == 'blobsfinder':
+                    tp, tot, fp, true_x, true_y, predicted_x, predicted_y = test(model, test_loader, criterion, config)
+                    truth_x_name = config['prediction_dir'] + "/x_" + config['name'] + '_targets.npy'
+                    truth_y_name = config['prediction_dir'] + "/y_"  + config['name'] + '_targets.npy'
+                    prediction_x_name = config['prediction_dir'] + "/x_" + config['name'] + '_predictions.npy'
+                    prediction_y_name = config['prediction_dir'] + "/y_"  + config['name'] + '_predictions.npy'
+                    np.save(truth_x_name, true_x)
+                    np.save(truth_y_name, true_y)
+                    np.save(prediction_x_name, predicted_x)
+                    np.save(prediction_y_name, predicted_y)
+                    wandb.log({'Detections': tp, 'Total': tot, 'FP': fp })
+                if config['model'] == 'spectral':
+                    tp, tot, fp, true_z, true_extension, predicted_z, predicted_extension = test(model, test_loader, criterion, config)
+                    truth_z_name = config['prediction_dir'] + "/z_" + config['name'] + '_targets.npy'
+                    truth_extension_name = config['prediction_dir'] + "/z_extension_"  + config['name'] + '_targets.npy'
+                    prediction_z_name = config['prediction_dir'] + "/z_" + config['name'] + '_predictions.npy'
+                    prediction_extension_name = config['prediction_dir'] + "/z_extension_"  + config['name'] + '_predictions.npy'
+                    np.save(truth_z_name, true_z)
+                    np.save(truth_extension_name, true_extension)
+                    np.save(prediction_z_name, predicted_z)
+                    np.save(prediction_extension_name, predicted_extension)
+                    wandb.log({'Detections': tp, 'Total': tot, 'FP': fp })
+
+    def select_criterion(self, criterion_name):
+        if isinstance(criterion_name, list):
+            criterion = []
+            for crit in criterion_name:
+                if crit == 'l_1':
+                    criterion.append(nn.L1Loss())
+                elif crit == 'l_2':
+                    criterion.append(nn.MSELoss())
+                elif crit == 'ssim':
+                    criterion.append(SSIMLoss(window_size=3))
+        else:
+            if criterion_name == 'l_1':
+                criterion = nn.L1Loss()
+            elif criterion_name == 'l_2':
+                criterion = nn.MSELoss()
+            elif criterion_name == 'ssim':
+                criterion = SSIMLoss(window_size=3)
+        return criterion
+
+    def get_spectral_loader_from_blobsfinder_predictions(self, model, dataset, loader, criterion, config):
+        model.eval()
+        dirty_list = dataset.dirty_list
+        clean_list = dataset.clean_list
+        parameters = dataset.parameters
+        targs = []
+        true_x = []
+        true_y = []
+        predicted_x = []
+        predicted_y = []
+        spectra = []
+        dspectra = []
+        t = 0
+        fp = 0
+        for i_batch, batch in tqdm(enumerate(loader)):
+            inputs = batch[0].to(self.device)
+            targets = batch[1].to(self.device)
+            target_boxes =  batch[2]
+            targets = targets.to(self.device)
+            idxs = batch[3]
+            loss, outputs = test_batch(inputs, targets, model, criterion)
+            for b in tqdm(range(len(outputs))):
+                output = outputs[b, 0].cpu().detach().numpy()
+                dirty_name = dirty_list[idxs[b]]
+                clean_name = clean_list[idxs[b]]
+                db_idx = float(dirty_name.split('_')[-1].split('.')[0])
+                params = parameters.loc[parameters.ID == db_idx]
+                boxes = np.array(params[["y0", "x0", "y1", "x1"]].values)
+                z_ = np.array(params["z"].values)
+                fwhm_z = np.array(params["fwhm_z"].values)
+                extensions = 2 * fwhm_z 
+                targets = np.array(params[["x", "y", "fwhm_x", "fwhm_y", "pa", "flux", 'continuum']].values)
+                targets['z'] = z_
+                targets['extensions'] = extensions
+                dirty_cube = fits.getdata(dirty_name) 
+                clean_cube = fits.getdata(clean_name)
+                min_, max_ = np.min(output), np.max(output)
+                output = (output - min_) / (max_ - min_)
+                tboxes = target_boxes[b]
+                seg = output.copy()
+                seg[seg > 0.15] = 1
+                seg = seg.astype(int)
+                struct = ndimage.generate_binary_structure(2, 2)
+                seg = binary_dilation(seg, struct)
+                props = regionprops(label(seg, connectivity=2))
+                boxes = []
+                for prop in props:
+                    y0, x0, y1, x1 = prop.bbox
+                    boxes.append([y0, x0, y1, x1])
+                boxes = np.array(boxes)
+                dirty_spectra = np.array([
+                    np.sum(dirty_cube[0][:, boxes[j][0]: boxes[j][2], boxes[j][1]: boxes[j][3]], axis=(1, 2))
+                    for j in range(len(boxes))
+                    ])
+                clean_spectra = np.array([
+                    np.sum(clean_cube[0][:, boxes[j][0]: boxes[j][2], boxes[j][1]: boxes[j][3]], axis=(1, 2))
+                    for j in range(len(boxes))
+                    ])
+                for j in range(len(dirty_spectra)):
+                    targs.append(targets[j])
+                    dspec = dirty_spectra[j]
+                    dspec = (dspec - np.mean(dspec)) / np.std(dspec)
+                    spec = clean_spectra[j]
+                    spec = (spec - np.mean(spec)) / np.std(spec)
+                    spectra.append(spec)
+                    dspectra.append(dspec)
+                ious = box_iou(torch.Tensor(tboxes), torch.Tensor(boxes)).numpy()
+                ious = np.max(ious, axis=1)
+                txc = tboxes[:, 1] + 0.5 * (tboxes[:, 3] - tboxes[:, 1])
+                tyc = tboxes[:, 0] + 0.5 * (tboxes[:, 2] - tboxes[:, 0])
+                xc = boxes[:, 1] + 0.5 * (boxes[:, 3] - boxes[:, 1])
+                yc = boxes[:, 0] + 0.5 * (boxes[:, 2] - boxes[:, 0])
+                dists = []
+                for j in range(len(txc)):
+                    d = []
+                    for k in range(len(xc)):
+                        d.append(np.sqrt((txc[j] - xc[k])**2 + (tyc[j] - yc[k])**2))
+                    dists.append(d)
+                dists = np.array(dists)
+                d_idxs = np.argmin(dists, axis=1)
+                dists = np.min(dists, axis=1)
+                for i in range(len(dists)):
+                    if ious[i] >= config['twoD_iou_threshold'] and dists[i] <= config['twoD_dist_threshold']:
+                        true_x.append(txc[i])
+                        true_y.append(tyc[i])
+                        predicted_x.append(xc[d_idxs[i]])
+                        predicted_y.append(yc[d_idxs[i]])
+                        t += 1
+                if len(boxes) > len(tboxes):
+                    fp += len(boxes) - len(tboxes)
+                
+        true_x = np.array(true_x)
+        true_y = np.array(true_y)
+        predicted_x = np.array(predicted_x)
+        predicted_y = np.array(predicted_y)
+        spectra = np.array(spectra)
+        dspectra = np.array(dspectra)
+        dspectra = np.transpose(dspectra[np.newaxis], 
+                                        axes=(1, 2, 0))
+        spectra = np.transpose(spectra[np.newaxis], 
+                                        axes=(1, 2, 0)) 
+        dataset = TensorDataset(torch.Tensor(dspectra), torch.Tensor(spectra))
+
+
+
+    def train_and_test_pipeline(self):
+        blobsfinder = bf.BlobsFinder(self.hyperparameters['input_channels'], 
+                               self.hyperparameters['blobsfinder_latent_channels'],
+                               self.hyperparameters['encoder_output_channels'],
+                               self.hyperparameters['activation_function'])
+        deepgru = dg.DeepGRU(self.hyperparameters['input_channels'],
+                               self.hyperparameters['deepgru_latent_channels'],
+                               self.hyperparameters['output_channels'], 
+                               self.hyperparameters['bidirectional'])
+        resnet = rn.ResNet18(self.hyperparameters['input_channels'], self.hyperparameters['output_channels'])
+        if torch.cuda.device_count() > 1 and self.hyperparameters['multi_gpu']:
+            print(f'Using {torch.cuda.device_count()} GPUs')
+            blobsfinder = nn.DataParallel(blobsfinder)
+            deepgru = nn.DataParallel(deepgru)
+            resnet = nn.DataParallel(resnet)
+        blobsfinder = blobsfinder.to(self.device)
+        deepgru = deepgru.to(self.device)
+        resnet = resnet.to(self.device)
+
+        if self.hyperparameters['optimizer'] == 'Adam':
+            blobsfinder_optimizer = torch.optim.Adam(blobsfinder.parameters(), lr=self.hyperparameters['blobsfinder_learning_rate'], 
+                                         weight_decay=self.hyperparameters['weight_decay'])
+            deepgru_optimizer = torch.optim.Adam(deepgru.parameters(), lr=self.hyperparameters['deepgru_learning_rate'], 
+                                         weight_decay=self.hyperparameters['weight_decay'])
+            resnet_optimizer = torch.optim.Adam(resnet.parameters(), lr=self.hyperparameters['resnet_learning_rate'], 
+                                         weight_decay=self.hyperparameters['weight_decay'])
+        elif self.hyperparameters['optimizer'] == 'SGD':
+            blobsfinder_optimizer = torch.optim.SGD(blobsfinder.parameters(), lr=self.hyperparameters['blobsfinder_learning_rate'], 
+                                    momentum=0.9)
+            deepgru_optimizer = torch.optim.SGD(deepgru.parameters(), lr=self.hyperparameters['deepgru_learning_rate'], 
+                                    momentum=0.9)
+            resnet_optimizer = torch.optim.SGD(resnet.parameters(), lr=self.hyperparameters['resnet_learning_rate'], 
+                                    momentum=0.9)
+        blobsfinder_criterion = self.select_criterion(self.hyperparameters['blobsfinder_criterion'])
+        deepgru_criterion = self.select_criterion(self.hyperparameters['deepgru_criterion'])
+        resnet_criterion = self.select_criterion(self.hyperparameters['resnet_criterion'])
+        print('Loading Checkpoints for all models')
+        blobsfinder_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['blobsfinder_name'] + ".pt"))
+        deepgru_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['deepgru_name'] + ".pt"))
+        resnet_fwhmx_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_fwhmx_name'] + ".pt"))
+        resnet_fwhmy_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_fwhmy_name'] + ".pt"))
+        resnet_pa_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_pa_name'] + ".pt"))
+        resnet_flux_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_flux_name'] + ".pt"))
+        blobsfinder, _, _ = load_checkpoint(blobsfinder, blobsfinder_optimizer, blobsfinder_outpath)
+        deepgru, _, _ = load_checkpoint(deepgru, deepgru_optimizer, deepgru_outpath)
+        resnet_fwhmx, _, _ = load_checkpoint(resnet, resnet_optimizer, resnet_fwhmx_outpath)
+        resnet_fwhmy, _, _ = load_checkpoint(resnet, resnet_optimizer, resnet_fwhmy_outpath)
+        resnet_pa, _, _ = load_checkpoint(resnet, resnet_optimizer, resnet_pa_outpath)
+        resnet_flux, _, _ = load_checkpoint(resnet, resnet_optimizer, resnet_flux_outpath)
+        train_dataset = ld.ALMADataset('train_params.csv', self.train_dir, 
+                                                transform=self.test_compose)
+        valid_dataset = ld.ALMADataset('valid_params.csv', self.valid_dir, 
+                                                transform=self.test_compose)
+        train_loader = DataLoader(train_dataset, batch_size=self.hyperparameters['batch_size'], num_workers=os.cpu_count(), 
+                              pin_memory=True, shuffle=True, collate_fn=train_dataset.collate_fn)
+        valid_loader = DataLoader(valid_dataset, batch_size=self.hyperparameters['batch_size'], num_workers=os.cpu_count(), 
+                              pin_memory=True, shuffle=True, collate_fn=valid_dataset.collate_fn)
+        test_dataset = ld.ALMADataset('test_params.csv', self.test_dir, transform=self.test_compose)
+        test_loader = DataLoader(test_dataset, batch_size=self.hyperparameters['batch_size'], num_workers=os.cpu_count(), 
+                              pin_memory=True, shuffle=True, collate_fn=test_dataset.collate_fn)
+        if self.hyperparameters['mode'] == 'train':
+            with wandb.init(project=self.hyperparameters['project'],
+                             name=self.hyperparameters['name'], 
+                             entity=self.hyperparameters['entity'], 
+                             config=self.hyperparameters):
+                config = wandb.config
+                
+        
+                
+
+        else:
+            with wandb.init(project=self.hyperparameters['project'],
+                             name=self.hyperparameters['name'] + '_Test', 
+                             entity=self.hyperparameters['entity'],
+                             config=self.hyperparameters, 
+                             ):
+                config = wandb.config
+
+
+            

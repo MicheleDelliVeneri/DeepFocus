@@ -17,6 +17,7 @@ import cv2
 from torch.utils.data._utils.collate import default_collate
 from typing import Sequence, Dict
 from tqdm import tqdm
+from scipy.ndimage import binary_dilation, generate_binary_structure
 
 HISTORY = "history"
 
@@ -514,26 +515,14 @@ class RandomVerticalFlip(object):
 class ToTensor(object):
     """Convert ndarrays in sample to Tensor"""
 
-    def __init__(self, model):
-        self.model = model
+    def __init__(self):
         pass
 
     def __call__(self, sample):
-        if self.model == 'blobsfinder':
             dirty_image = torch.from_numpy(sample['dirty_img'][np.newaxis, :, :])
             clean_image = torch.from_numpy(sample['clean_img'][np.newaxis, : , :])
             sample['dirty_img'] = dirty_image
             sample['clean_img'] = clean_image
-            return sample
-        elif self.model == 'spectral':
-            dirty_spectra = torch.from_numpy(sample['dirty_spectra'][:, :, np.newaxis])
-            clean_spectra = torch.from_numpy(sample['clean_spectra'][:, :, np.newaxis])
-            sample['dirty_spectra'] = dirty_spectra
-            sample['clean_speactra'] = clean_spectra
-            return sample
-        elif self.model == 'resnet':
-            focused = torch.from_numpy(sample['focused'][np.newaxis, :, :])
-            sample['focused'] = focused
             return sample
 
 class Crop(object):
@@ -598,7 +587,7 @@ class ALMADataset(Dataset):
         clean_img = np.sum(fits.getdata(clean_name)[0], axis=0)
         dirty_img = np.sum(fits.getdata(dirty_name)[0], axis=0)
         
-        sample = {'dirty_img': dirty_img, 'clean_img': clean_img, 'boxes': boxes, 'snrs': snrs}
+        sample = {'dirty_img': dirty_img, 'clean_img': clean_img, 'boxes': boxes, 'snrs': snrs, 'idx': idx}
         if self.transform:
             sample = self.transform(sample)
         return sample
@@ -612,17 +601,18 @@ class ALMADataset(Dataset):
         dirty_images = list()
         boxes = list()
         snrs = list()
-        if self.model == 'blobsfinder':
-            for b in batch:
-                clean_images.append(b['clean_img'])
-                dirty_images.append(b['dirty_img'])
-                boxes.append(b['boxes'])
-                snrs.append(b['snrs'])
+        idxs = list()
+        for b in batch:
+            clean_images.append(b['clean_img'])
+            dirty_images.append(b['dirty_img'])
+            boxes.append(b['boxes'])
+            snrs.append(b['snrs'])
+            idxs.append(b['idx'])
             
-            clean_images = torch.stack(clean_images, dim=0)
-            dirty_images = torch.stack(dirty_images, dim=0)
+        clean_images = torch.stack(clean_images, dim=0)
+        dirty_images = torch.stack(dirty_images, dim=0)
            
-            return dirty_images, clean_images, boxes, snrs
+        return dirty_images, clean_images, boxes, snrs
 
 class PipelineDataLoader(object):
     def __init__(self, csv_file, root_dir):
@@ -640,6 +630,7 @@ class PipelineDataLoader(object):
             os.path.join(self.root_dir, file) for file in os.listdir(self.root_dir) if 'clean' in file]))
     def create_dataset(self):
         focused = []
+        line_images = []
         targs = []
         spectra = []
         dspectra = []
@@ -673,6 +664,16 @@ class PipelineDataLoader(object):
                 width_x, width_y = x_1 - x_0, y_1 - y_0
                 x, y = x_0 + 0.5 * width_x, y_0 + 0.5 * width_y
                 source = np.sum(dirty_cube[0][z_0:z_1, int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+                cont_image = np.mean(np.concatenate(
+                                    (
+                                        dirty_cube[0][:z_0, int(y) - 32: int(y) + 32,
+                                                       int(x) - 32: int(x) + 32],
+                                        dirty_cube[0][z_1:, int(y) - 32: int(y) + 32,
+                                                       int(x) - 32: int(x) + 32]
+                                    ),
+                                    axis=0), axis=0) * (z_1 - z_0)
+
+                
                 xsize, ysize = int(source.shape[0]), int(source.shape[1])
                 dx, dy = xsize - 64, ysize - 64
                 if dx % 2 == 0:
@@ -684,9 +685,22 @@ class PipelineDataLoader(object):
                 else:
                     bottom, top = dy // 2, ysize - dy // 2 - 1
                 source = source[left:right, bottom:top]
+                cont_source = source[left:right, bottom:top]
+                cont_subtracted = source  - cont_source
+                model = np.sum(clean_cube[0][z_0:z_1, int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+                min_, max_ = np.min(model), np.max(model)
+                model = (model - min_) / (max_ - min_)
+                model[model > 0.15] = 1
+                model = model.astype(int)
+                struct = generate_binary_structure(2, 2)
+                model = binary_dilation(model, struct)
+                line_image = model * cont_subtracted
+                min_, max_ = np.min(line_image), np.max(line_image)
+                line_image = (line_image - min_) / (max_ - min_)
                 min_, max_ = np.min(source), np.max(source)
                 source = (source - min_) / (max_ - min_)
                 focused.append(source[np.newaxis])
+                line_images.append(line_image[np.newaxis])
                 xs.append(32 - left)
                 ys.append(32 - bottom)
             targets[:, 0] = xs
@@ -700,6 +714,7 @@ class PipelineDataLoader(object):
                 spectra.append(spec)
                 dspectra.append(dspec)
         focused = np.array(focused)
+        line_images = np.array(line_images)
         targs = np.array(targs)   
         spectra = np.array(spectra)
         dspectra = np.array(dspectra)
@@ -708,6 +723,6 @@ class PipelineDataLoader(object):
         spectra = np.transpose(spectra[np.newaxis], 
                                         axes=(1, 2, 0)) 
 
-        return spectra, dspectra, focused, targs    
+        return spectra, dspectra, focused, targs, line_images    
 
     
