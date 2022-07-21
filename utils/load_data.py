@@ -685,7 +685,7 @@ class PipelineDataLoader(object):
                 else:
                     bottom, top = dy // 2, ysize - dy // 2 - 1
                 source = source[left:right, bottom:top]
-                cont_source = source[left:right, bottom:top]
+                cont_source = cont_image[left:right, bottom:top]
                 cont_subtracted = source  - cont_source
                 model = np.sum(clean_cube[0][z_0:z_1, int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
                 min_, max_ = np.min(model), np.max(model)

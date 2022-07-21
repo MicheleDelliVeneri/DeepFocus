@@ -294,8 +294,8 @@ def train(model, train_loader, valid_loader, criterion, optimizer, config, devic
                         log_spectra(inputs, outputs, targets, 'Train')
                     if config['model'] == 'resnet':
                         log_parameters(outputs, targets, 'Train', config)
-            running_loss += loss.item() * inputs.size(0)
-            valid_losses.append(loss.item())
+                running_loss += loss.item() * inputs.size(0)
+                valid_losses.append(loss.item())
         valid_loss = np.average(valid_losses)
         epoch_loss = running_loss / len(valid_loader.dataset)
         print(f"Validation Loss {epoch_loss}")
@@ -619,6 +619,7 @@ def make(config, device):
 class Pipeline(object):
 
     def __init__(self, hyperparameters, device):
+        # folders
         output_dir = hyperparameters['output_dir']
         if not os.path.exists(output_dir):
             os.mkdir(output_dir)
@@ -630,12 +631,425 @@ class Pipeline(object):
         self.train_dir = hyperparameters['data_folder'] + 'Train/'
         self.valid_dir = hyperparameters['data_folder'] + 'Validation/'
         self.test_dir = hyperparameters['data_folder'] + 'Test/'
+
+        # transformations 
         crop = ld.Crop(256)
         norm_img = ld.NormalizeImage()
         to_tensor = ld.ToTensor()
+        hflip = ld.RandomHorizontalFlip(p=1)
+        vflip = ld.RandomVerticalFlip(p=1)
+        rotate = ld.RandomRotate()
+        self.train_compose = transforms.Compose([rotate, vflip, hflip, crop, norm_img, to_tensor])
         self.test_compose = transforms.Compose([crop, norm_img, to_tensor])
+
+        # utils
         self.device = device
         self.hyperparameters = hyperparameters
+        # Models Initializations
+        blobsfinder = bf.BlobsFinder(self.hyperparameters['input_channels'], 
+                               self.hyperparameters['blobsfinder_latent_channels'],
+                               self.hyperparameters['encoder_output_channels'],
+                               self.hyperparameters['activation_function'])
+        deepgru = dg.DeepGRU(self.hyperparameters['input_channels'],
+                               self.hyperparameters['deepgru_latent_channels'],
+                               self.hyperparameters['output_channels'], 
+                               self.hyperparameters['bidirectional'])
+        resnet = rn.ResNet18(self.hyperparameters['input_channels'], self.hyperparameters['output_channels'])
+
+        if torch.cuda.device_count() > 1 and self.hyperparameters['multi_gpu']:
+            print(f'Using {torch.cuda.device_count()} GPUs')
+            blobsfinder = nn.DataParallel(blobsfinder)
+            deepgru = nn.DataParallel(deepgru)
+            resnet = nn.DataParallel(resnet)
+        self.blobsfinder = blobsfinder.to(self.device)
+        self.deepgru = deepgru.to(self.device)
+        self.resnet = resnet.to(self.device)
+
+        # Optimizers 
+        if self.hyperparameters['optimizer'] == 'Adam':
+            self.blobsfinder_optimizer = torch.optim.Adam(self.blobsfinder.parameters(), lr=self.hyperparameters['blobsfinder_learning_rate'], 
+                                         weight_decay=self.hyperparameters['weight_decay'])
+            self.deepgru_optimizer = torch.optim.Adam(self.deepgru.parameters(), lr=self.hyperparameters['deepgru_learning_rate'], 
+                                         weight_decay=self.hyperparameters['weight_decay'])
+            self.resnet_optimizer = torch.optim.Adam(self.resnet.parameters(), lr=self.hyperparameters['resnet_learning_rate'], 
+                                         weight_decay=self.hyperparameters['weight_decay'])
+        elif self.hyperparameters['optimizer'] == 'SGD':
+            self.blobsfinder_optimizer = torch.optim.SGD(self.blobsfinder.parameters(), lr=self.hyperparameters['blobsfinder_learning_rate'], 
+                                    momentum=0.9)
+            self.deepgru_optimizer = torch.optim.SGD(self.deepgru.parameters(), lr=self.hyperparameters['deepgru_learning_rate'], 
+                                    momentum=0.9)
+            self.resnet_optimizer = torch.optim.SGD(self.resnet.parameters(), lr=self.hyperparameters['resnet_learning_rate'], 
+                                    momentum=0.9)
+
+        # Criterions 
+        self.blobsfinder_criterion = self.select_criterion(self.hyperparameters['blobsfinder_criterion'])
+        self.deepgru_criterion = self.select_criterion(self.hyperparameters['deepgru_criterion'])
+        self.resnet_criterion = self.select_criterion(self.hyperparameters['resnet_criterion'])
+
+        # Saving and Loading paths for models
+        self.blobsfinder_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['blobsfinder_name'] + ".pt"))
+        self.deepgru_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['deepgru_name'] + ".pt"))
+        self.resnet_fwhmx_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_fwhmx_name'] + ".pt"))
+        self.resnet_fwhmy_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_fwhmy_name'] + ".pt"))
+        self.resnet_pa_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_pa_name'] + ".pt"))
+        self.resnet_flux_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_flux_name'] + ".pt"))
+    
+    
+    def make(self, config):
+        if config['model'] == 'blobsfinder':
+            if config['mode'] == 'train':
+                train_dataset = ld.ALMADataset('train_params.csv', self.train_dir, transform=self.train_compose)
+                valid_dataset = ld.ALMADataset('valid_params.csv', self.valid_dir, transform=self.train_compose)
+        
+                train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                              pin_memory=True, shuffle=True, collate_fn=train_dataset.collate_fn)
+                valid_loader = DataLoader(valid_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                              pin_memory=True, shuffle=True, collate_fn=valid_dataset.collate_fn)
+            else:
+                print("Preparing Data for Blobs Finder Testing....")
+            test_dataset = ld.ALMADataset('test_params.csv', self.test_dir, transform=self.test_compose)
+            test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                              pin_memory=True, shuffle=True, collate_fn=test_dataset.collate_fn)
+
+        else:
+            if config['mode'] == 'train':
+                traindata = ld.PipelineDataLoader('train_params.csv', self.train_dir)
+                validdata = ld.PipelineDataLoader('valid_params.csv', self.valid_dir)
+                t_spectra, t_dspectra, t_focused, t_targets, t_line_images = traindata.create_dataset()
+                v_spectra, v_dspectra, v_focused, v_targets, v_line_images = validdata.create_dataset()  
+            testddata = ld.PipelineDataLoader('test_params.csv', self.test_dir)
+            te_spectra, te_dspectra, te_focused, te_targets, te_line_images = testddata.create_dataset()
+            if config['model'] == 'spectral':
+                if config['mode'] == 'train':
+                    print('Preparing Data for Deep GRU Training and Testing...')
+                    train_dataset = TensorDataset(torch.Tensor(t_dspectra), torch.Tensor(t_spectra))
+                    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                                  pin_memory=True, shuffle=True)
+                    valid_dataset = TensorDataset(torch.Tensor(v_dspectra), torch.Tensor(v_spectra))
+                    valid_loader = DataLoader(valid_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                                  pin_memory=True, shuffle=True)
+                else:
+                    print("Preparing Data for Deep GRU Testing....")
+                test_dataset = TensorDataset(torch.Tensor(te_dspectra), torch.Tensor(te_spectra))
+                test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(),
+                                  pin_memory=True, shuffle=False)
+
+            if config['model'] == 'resnet':
+                if config['mode'] == 'train':
+                    print('Preparing Data for ResNet Training and Testing...')
+                    if config['param'] == 'flux':
+                        train_dataset = TensorDataset(torch.Tensor(t_line_images), torch.Tensor(t_targets))
+                        valid_dataset = TensorDataset(torch.Tensor(v_line_images), torch.Tensor(v_targets))
+                    else:
+                        train_dataset = TensorDataset(torch.Tensor(t_focused), torch.Tensor(t_targets))
+                        valid_dataset = TensorDataset(torch.Tensor(v_focused), torch.Tensor(v_targets))
+                    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                                  pin_memory=True, shuffle=True)
+                    valid_loader = DataLoader(valid_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                                  pin_memory=True, shuffle=True)
+                else:
+                    print("Preparing Data for ResNet Testing...")
+                if config['param'] == 'flux':
+                    test_dataset = TensorDataset(torch.Tensor(te_line_images), torch.Tensor(te_targets))
+                else:
+                    test_dataset = TensorDataset(torch.Tensor(te_focused), torch.Tensor(te_targets))
+                test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(),
+                                  pin_memory=True, shuffle=False)
+        if config['mode'] == 'train':
+            return train_loader, valid_loader, test_loader
+        else:
+            return test_loader
+
+    def train_model(self, model, train_loader, valid_loader, config):
+        example_ct = 0
+        best_loss = 9999
+        # initialize the early_stopping object
+        if config['early_stopping']:
+            early_stopping = EarlyStopping(patience=config['patience'], verbose=False)
+        for epoch in tqdm(range(config.epochs)):
+            running_loss = 0.0
+            model.train()
+            for i_batch, batch in tqdm(enumerate(train_loader)):
+                inputs = batch[0].to(self.device)
+                targets = batch[1]
+                if config['model'] == 'resnet':
+                    targets = param_selector(targets, config['param']).to(self.device)
+                targets.to(self.device)
+                if config['model'] == 'spectral':
+                    inputs = normalize_spectra(inputs)
+                    targets = normalize_spectra(targets)
+                if config['model'] == 'blobsfinder':
+                    loss, outputs = train_batch(inputs, targets, model, 
+                                    self.blobsfinder_optimizer, self.blobsfinder_criterion)
+                    train_log(loss, self.blobsfinder_optimizer, epoch)
+                if config['model'] == 'spectral':
+                    self.deepgru.train()
+                    loss, outputs = train_batch(inputs, targets, model, 
+                                    self.deepgru_optimizer, self.deepgru_criterion)
+                    train_log(loss, self.deepgru_optimizer, epoch)
+                if config['model'] == 'resnet':
+                    self.resnet.train()
+                    loss, outputs = train_batch(inputs, targets, model, 
+                                    self.resnet_optimizer, self.resnet_criterion)
+                    train_log(loss, self.resnet_optimizer, epoch)
+                example_ct += len(inputs)
+                if i_batch == len(train_loader) - 1:
+                    if config['model'] == 'blobsfinder':
+                        log_images(inputs, outputs, targets, 'Train')
+                    if config['model'] == 'spectral':
+                        log_spectra(inputs, outputs, targets, 'Train')
+                    if config['model'] == 'resnet':
+                        log_parameters(outputs, targets, 'Train', config)
+                running_loss += loss.item() * inputs.size(0)
+            epoch_loss = running_loss / len(train_loader.dataset)
+            print(f"Training Loss {epoch_loss}")
+            torch.cuda.empty_cache()
+            model.eval()
+            running_loss = 0.0
+            valid_losses = []
+            with torch.no_grad():
+                for i_batch, batch in tqdm(enumerate(valid_loader)):
+                    inputs = batch[0].to(self.device)
+                    targets = batch[1]
+                    if config['model'] == 'resnet':
+                        targets = param_selector(targets, config['param']).to(self.device)
+                    targets.to(self.device)
+                    if config['model'] == 'spectral':
+                        inputs = normalize_spectra(inputs)
+                        targets = normalize_spectra(targets)
+                    if config['model'] == 'blobsfinder':
+                        loss, outputs = valid_batch(inputs, targets, model,
+                                         self.blobsfinder_optimizer, self.blobsfinder_criterion)
+                        valid_log(loss)
+                        log_images(inputs, outputs, targets, 'Train')
+                    if config['model'] == 'spectral':
+                        loss, outputs = valid_batch(inputs, targets, model,
+                                         self.deepgru_optimizer, self.deepgru_criterion)
+                        valid_log(loss)
+                        log_spectra(inputs, outputs, targets, 'Train')
+                    if config['model'] == 'resnet':
+                        loss, outputs = valid_batch(inputs, targets, model,
+                                         self.resnet_optimizer, self.resnet_criterion)
+                        valid_log(loss)
+                        log_parameters(outputs, targets, 'Train', config)
+                    running_loss += loss.item() * inputs.size(0)
+                    valid_losses.append(loss.item())
+            valid_loss = np.average(valid_losses)
+            epoch_loss = running_loss / len(valid_loader.dataset)
+            print(f"Validation Loss {epoch_loss}")
+            if config['early_stopping']:
+                if config['model'] == 'blobsfinder':
+                    early_stopping(valid_loss, model, self.blobsfinder_optimizer, 
+                            self.blobsfinder_outpath, epoch)
+                if config['model'] == 'spectral':
+                    early_stopping(valid_loss, model, self.deepgru_optimizer, 
+                            self.deepgru_outpath, epoch)
+                if config['model'] == 'resnet':
+                    if config['param'] == 'fwhm_x':
+                        early_stopping(valid_loss, model, self.resnet_optimizer, 
+                            self.resnet_fwhmx_outpath, epoch)
+                    if config['param'] == 'fwhm_y':
+                        early_stopping(valid_loss, model, self.resnet_optimizer, 
+                            self.resnet_fwhmy_outpath, epoch)
+                    if config['param'] == 'pa':
+                        early_stopping(valid_loss, model, self.resnet_optimizer, 
+                            self.resnet_pa_outpath, epoch)
+                    if config['param'] == 'flux':
+                        early_stopping(valid_loss, model, self.resnet_optimizer, 
+                            self.resnet_flux_outpath, epoch)
+
+            else:
+                if epoch_loss < best_loss:
+                    best_loss = epoch_loss
+                    if config['model'] == 'blobsfinder':
+                        save_checkpoint(model, self.blobsfinder_optimizer, self.blobsfinder_outpath, epoch)
+                    if config['model'] == 'spectral':
+                        save_checkpoint(model, self.deepgru_optimizer, self.deepgru_outpath, epoch)
+                    if config['model'] == 'resnet':
+                        if config['param'] == 'fwhm_x':
+                            save_checkpoint(model, self.resnet_optimizer, self.resnet_fwhmx_outpath, epoch)
+                        if config['param'] == 'fwhm_y':
+                            save_checkpoint(model, self.resnet_optimizer, self.resnet_fwhmy_outpath, epoch)
+                        if config['param'] == 'pa':
+                            save_checkpoint(model, self.resnet_optimizer, self.resnet_pa_outpath, epoch)
+                        if config['param'] == 'flux':
+                            save_checkpoint(model, self.resnet_optimizer, self.resnet_flux_outpath, epoch)    
+            return model
+
+    def test_model(self, model, test_loader, config):
+        tgs = []
+        pds = []
+        true_x = []
+        true_y = []
+        predicted_x = []
+        predicted_y = []
+        true_z = []
+        predicted_z = []
+        true_extension = []
+        predicted_extension = []
+        model.eval()
+        for i_batch, batch in tqdm(enumerate(test_loader)):
+            inputs = batch[0].to(self.device)
+            targets = batch[1]
+            if config['model'] == 'resnet':
+                targets = param_selector(targets, config['param']).to(self.device)
+            targets.to(self.device)
+            if config['model'] == 'spectral':
+                inputs = normalize_spectra(inputs)
+                targets = normalize_spectra(targets)
+            if config['model'] == 'blobsfinder':
+                target_boxes =  batch[2]
+            targets = targets.to(self.device)
+            if config['model'] == 'blobsfinder':
+                loss, outputs = test_batch(inputs, targets, model, self.blobsfinder_criterion)
+                test_log(loss)
+                for b in tqdm(range(len(targets))):
+                    output = outputs[b, 0].cpu().detach().numpy()
+                    min_, max_ = np.min(output), np.max(output)
+                    output = (output - min_) / (max_ - min_)
+                    tboxes = target_boxes[b]
+                    seg = output.copy()
+                    seg[seg > 0.15] = 1
+                    seg = seg.astype(int)
+                    struct = ndimage.generate_binary_structure(2, 2)
+                    seg = binary_dilation(seg, struct)
+                    props = regionprops(label(seg, connectivity=2))
+                    boxes = []
+                    for prop in props:
+                        y0, x0, y1, x1 = prop.bbox
+                        boxes.append([y0, x0, y1, x1])
+                    boxes = np.array(boxes)
+                    ious = box_iou(torch.Tensor(tboxes), torch.Tensor(boxes)).numpy()
+                    ious = np.max(ious, axis=1)
+                    txc = tboxes[:, 1] + 0.5 * (tboxes[:, 3] - tboxes[:, 1])
+                    tyc = tboxes[:, 0] + 0.5 * (tboxes[:, 2] - tboxes[:, 0])
+                    xc = boxes[:, 1] + 0.5 * (boxes[:, 3] - boxes[:, 1])
+                    yc = boxes[:, 0] + 0.5 * (boxes[:, 2] - boxes[:, 0])
+                    dists = []
+                    #dists = [[np.sqrt((txc[j] - xc[k])**2 + (tyc[j] - yc[k])**2 for k in range(len(xc))] for j in range(len(txc))]
+                    for j in range(len(txc)):
+                        d = []
+                        for k in range(len(xc)):
+                            d.append(np.sqrt((txc[j] - xc[k])**2 + (tyc[j] - yc[k])**2))
+                        dists.append(d)
+                    dists = np.array(dists)
+                    idxs = np.argmin(dists, axis=1)
+                    dists = np.min(dists, axis=1)
+
+                    for i in range(len(dists)):
+                        if ious[i] >= config['twoD_iou_threshold'] and dists[i] <= config['twoD_dist_threshold']:
+                            true_x.append(txc[i])
+                            true_y.append(tyc[i])
+                            predicted_x.append(xc[idxs[i]])
+                            predicted_y.append(yc[idxs[i]])
+                            t += 1
+                    if len(boxes) > len(tboxes):
+                        fp += len(boxes) - len(tboxes)
+            if config['model'] == 'spectral':
+                loss, outputs = test_batch(inputs, targets, model, self.deepgru_criterion)
+                test_log(loss)
+                for b in range(len(outputs)):
+                    tspectrum = targets[b, 3:127, 0].cpu().detach().numpy()
+                    pspectrum = targets[b, 3:127, 0].cpu().detach().numpy()
+                    min_, max_ = np.min(pspectrum), np.max(pspectrum)
+                    tmin_, tmax_ = np.min(tspectrum), np.max(tspectrum)
+                    y = (pspectrum - min_) / (max_ - min_)
+                    ty = (tspectrum -tmin_) / (tmax_ - tmin_)
+                    x = np.array(range(len(y)))
+                    peaks, _ = find_peaks(y, height=np.mean(y) + 0.1, prominence=0.05, distance=10)
+                    peaks_amp = y[peaks]
+                    x_peaks = x[peaks]
+                    tpeaks, _ = find_peaks(ty, height=0.0, prominence=0.05, distance=10)
+                    tpeaks_amp = ty[tpeaks]
+                    tx_peaks = x[tpeaks]
+                    lims = []
+                    idxs = []
+                    for i_peak, peak in enumerate(x_peaks):
+                        g1 = models.Gaussian1D(amplitude=peaks_amp[i_peak], mean=peak, stddev=3)
+                        fit_g = fitting.LevMarLSQFitter()
+                        if peak >= 10 and peak <= 118:
+                            g = fit_g(g1, x[peak - 10: peak + 10], y[peak - 10: peak + 10])
+                        elif peak < 10:
+                            g = fit_g(g1, x[0: peak + 10], y[0: peak + 10])
+                        else:
+                            g = fit_g(g1, x[peak - 10: peak + 128 - peak], y[peak - 10: peak + 128 - peak])
+                        m, dm = int(g.mean.value), int(g.fwhm)
+                        if dm <= 64:        
+                            lims.append([int(x_peaks[i_peak]) - dm, int(x_peaks[i_peak]) + dm])
+                            idxs.append(i_peak)
+                    tlims = []
+                    tidxs = []
+                    for i_peak, peak in enumerate(tx_peaks):
+                        g1 = models.Gaussian1D(amplitude=tpeaks_amp[i_peak], mean=peak, stddev=3)
+                        fit_g = fitting.LevMarLSQFitter()
+                        if peak >= 10 and peak <= 118:
+                            g = fit_g(g1, x[peak - 10: peak + 10], y[peak - 10: peak + 10])
+                        elif peak < 10:
+                            g = fit_g(g1, x[0: peak + 10], y[0: peak + 10])
+                        else:
+                            g = fit_g(g1, x[peak - 10: peak + 128 - peak], y[peak - 10: peak + 128 - peak])
+                        m, dm = int(g.mean.value), int(g.fwhm)
+                        if dm <= 64 and int(tx_peaks[i_peak]) - dm >= 0 and int(tx_peaks[i_peak]) + dm <= 128:
+                            tlims.append([int(tx_peaks[i_peak]) - dm, int(tx_peaks[i_peak]) + dm])
+                            tidxs.append(i_peak)
+                    if len(lims) > 0:
+                        x_peaks = x_peaks[idxs]
+                        peaks_amp = peaks_amp[idxs]     
+                    if len(tlims) > 0:
+                        tx_peaks = tx_peaks[tidxs]
+                        tpeaks_amp = tpeaks_amp[tidxs]
+                        ious = []
+
+                    if len(tlims) > 0 and len(lims) > 0:
+                        dists = []
+                        for j in range(len(tx_peaks)):
+                            d = []
+                            for k in range(len(x_peaks)):
+                                d.append(np.sqrt((tx_peaks[j] - x_peaks[k]) ** 2))
+                            dists.append(d)
+                        dists = np.array(dists)
+                        min_idxs = np.argmin(dists, axis=1)
+                        dists = np.min(dists, axis=1)
+                        for it, tlim in enumerate(tlims):
+                            idx = min_idxs[it]
+                            ious.append(iou(tlims[it], lims[idx]))
+                        ious = np.array(ious)
+                        for i in range(len(dists)):
+                            if ious[i] >= config['oneD_iou_threshold'] and dists[i] <= config['oneD_dist_threshold']:
+                                t += 1
+                                true_z.append(tx_peaks[i])
+                                predicted_z.append(x_peaks[min_idxs[i]])
+                                true_extension.append(tlims[i][1] - tlims[i][0])
+                                predicted_extension.append(lims[min_idxs[i]][1] -lims[min_idxs[i]][0])
+
+                        if len(x_peaks) > len(tx_peaks):
+                            fp += len(x_peaks) - len(tx_peaks)
+            
+            if config['model'] == 'resnet':
+                loss, outputs = test_batch(inputs, targets, model, self.resnet_criterion)
+                test_log(loss)
+                target = targets[b].cpu().detach().numpy()
+                prediction = outputs[b].cpu().detach().numpy()
+                for i in range(len(target)):
+                    tgs.append(target[i])
+                    pds.append(prediction[i])
+        tgs = np.array(tgs)
+        pds = np.array(pds)
+        res = tgs - pds
+        if config['model'] == 'blobsfinder':
+            true_x = np.array(true_x)
+            true_y = np.array(true_y)
+            predicted_x = np.array(predicted_x)
+            predicted_y = np.array(predicted_y)
+            return t, len(test_loader.dataset), fp, true_x, true_y, predicted_x, predicted_y
+        if config['model'] == 'spectral':
+            true_z = np.array(true_z)
+            predicted_z = np.array(predicted_z)
+            true_extension = np.array(true_extension)
+            predicted_extension = np.array(predicted_extension)
+            return t, len(test_loader.dataset), fp, true_z, true_extension, predicted_z, predicted_extension
+        if config['model'] == 'resnet':
+            return tgs, pds, res
 
     def train_and_test_model(self):
         if self.hyperparameters['mode'] == 'train':
@@ -644,12 +1058,18 @@ class Pipeline(object):
                              entity=self.hyperparameters['entity'], 
                              config=self.hyperparameters):
                 config = wandb.config
-                model, train_loader, valid_loader, test_loader, criterion, optimizer = make(config, self.test_dirdevice)
+                
+                train_loader, valid_loader, test_loader = self.make(config)
                 print('Training...')
-                model = train(model, train_loader, valid_loader, criterion, optimizer, config)
+                if config['model'] == 'boobsfinder':
+                    self.train_model(self.blobsfinder, train_loader, valid_loader, config)
+                if config['model'] == 'spectral':
+                    self.train_model(self.deepgru, train_loader, valid_loader, config)
+                if config['model'] == 'resnet':
+                    self.train_model(self.resnet, train_loader, valid_loader, config)
                 print('Testing...')
                 if config['model'] == 'resnet':
-                    tgs, pds, res = test(model, test_loader, criterion, config)
+                    tgs, pds, res = self.test_model(self.resnet, test_loader, config)
                     truth_name = config['prediction_dir'] + "/" + config['param'] + '_' + config['name'] + '_targets.npy'
                     prediction_name = config['prediction_dir'] + "/" + config['param'] + '_' + config['name'] + '_predictions.npy'
                     residual_name = config['prediction_dir'] + "/" + config['param'] + '_' + config['name'] + '_residuals.npy'
@@ -677,7 +1097,7 @@ class Pipeline(object):
                     wandb.log({"Scatter": fig})
                     return tgs, pds, res
                 if config['model'] == 'blobsfinder':
-                    tp, tot, fp, true_x, true_y, predicted_x, predicted_y = test(model, test_loader, criterion, config)
+                    tp, tot, fp, true_x, true_y, predicted_x, predicted_y = self.test_model(self.blobsfinder, test_loader, config)
                     truth_x_name = config['prediction_dir'] + "/x_" + config['name'] + '_targets.npy'
                     truth_y_name = config['prediction_dir'] + "/y_"  + config['name'] + '_targets.npy'
                     prediction_x_name = config['prediction_dir'] + "/x_" + config['name'] + '_prediction.npy'
@@ -688,7 +1108,7 @@ class Pipeline(object):
                     np.save(prediction_y_name, predicted_y)
                     return tp, tot, fp
                 if config['model'] == 'spectral':
-                    tp, tot, fp, true_z, true_extension, predicted_z, predicted_extension = test(model, test_loader, criterion, config)
+                    tp, tot, fp, true_z, true_extension, predicted_z, predicted_extension = self.test_model(self.deepgru, test_loader, config)
                     truth_z_name = config['prediction_dir'] + "/z_" + config['name'] + '_targets.npy'
                     truth_extension_name = config['prediction_dir'] + "/z_extension_"  + config['name'] + '_targets.npy'
                     prediction_z_name = config['prediction_dir'] + "/z_" + config['name'] + '_prediction.npy'
@@ -705,10 +1125,10 @@ class Pipeline(object):
                              config=self.hyperparameters, 
                              ):
                 config = wandb.config
-                model, test_loader, criterion, optimizer = make(config, self.device)
+                test_loader = make(config, self.device)
                 print('Testing...')
                 if config['model'] == 'resnet':
-                    tgs, pds, res = test(model, test_loader, criterion, config)
+                    tgs, pds, res = self.test_model(self.resnet, test_loader, config)
                     truth_name = config['prediction_dir'] + "/" + config['param'] + '_' + config['name'] + '_targets.npy'
                     prediction_name = config['prediction_dir'] + "/" + config['param'] + '_' + config['name'] + '_predictions.npy'
                     residual_name = config['prediction_dir'] + "/" + config['param'] + '_' + config['name'] + '_residuals.npy'
@@ -736,7 +1156,7 @@ class Pipeline(object):
                     plt.savefig(outhname)
                     wandb.log({"Scatter": fig})
                 if config['model'] == 'blobsfinder':
-                    tp, tot, fp, true_x, true_y, predicted_x, predicted_y = test(model, test_loader, criterion, config)
+                    tp, tot, fp, true_x, true_y, predicted_x, predicted_y = self.test_model(self.blobsfinder, test_loader, config)
                     truth_x_name = config['prediction_dir'] + "/x_" + config['name'] + '_targets.npy'
                     truth_y_name = config['prediction_dir'] + "/y_"  + config['name'] + '_targets.npy'
                     prediction_x_name = config['prediction_dir'] + "/x_" + config['name'] + '_predictions.npy'
@@ -747,7 +1167,7 @@ class Pipeline(object):
                     np.save(prediction_y_name, predicted_y)
                     wandb.log({'Detections': tp, 'Total': tot, 'FP': fp })
                 if config['model'] == 'spectral':
-                    tp, tot, fp, true_z, true_extension, predicted_z, predicted_extension = test(model, test_loader, criterion, config)
+                    tp, tot, fp, true_z, true_extension, predicted_z, predicted_extension = self.test_model(self.deepgru, test_loader, config)
                     truth_z_name = config['prediction_dir'] + "/z_" + config['name'] + '_targets.npy'
                     truth_extension_name = config['prediction_dir'] + "/z_extension_"  + config['name'] + '_targets.npy'
                     prediction_z_name = config['prediction_dir'] + "/z_" + config['name'] + '_predictions.npy'
@@ -777,7 +1197,7 @@ class Pipeline(object):
                 criterion = SSIMLoss(window_size=3)
         return criterion
 
-    def get_spectral_loader_from_blobsfinder_predictions(self, model, dataset, loader, criterion, config):
+    def get_spectral_loader_from_blobsfinder_predictions(self, model, dataset, loader, criterion, config, test=True):
         model.eval()
         dirty_list = dataset.dirty_list
         clean_list = dataset.clean_list
@@ -874,63 +1294,42 @@ class Pipeline(object):
         predicted_y = np.array(predicted_y)
         spectra = np.array(spectra)
         dspectra = np.array(dspectra)
+        targs = np.array(targs)
         dspectra = np.transpose(dspectra[np.newaxis], 
                                         axes=(1, 2, 0))
         spectra = np.transpose(spectra[np.newaxis], 
                                         axes=(1, 2, 0)) 
-        dataset = TensorDataset(torch.Tensor(dspectra), torch.Tensor(spectra))
-
-
+        dataset = TensorDataset(torch.Tensor(dspectra), torch.Tensor(spectra), torch.Tensor(targs))
+        if test:
+            loader = DataLoader(dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                                  pin_memory=True, shuffle=False)
+        else:  
+            loader = DataLoader(dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                                  pin_memory=True, shuffle=True)
+        return loader
 
     def train_and_test_pipeline(self):
-        blobsfinder = bf.BlobsFinder(self.hyperparameters['input_channels'], 
-                               self.hyperparameters['blobsfinder_latent_channels'],
-                               self.hyperparameters['encoder_output_channels'],
-                               self.hyperparameters['activation_function'])
-        deepgru = dg.DeepGRU(self.hyperparameters['input_channels'],
-                               self.hyperparameters['deepgru_latent_channels'],
-                               self.hyperparameters['output_channels'], 
-                               self.hyperparameters['bidirectional'])
-        resnet = rn.ResNet18(self.hyperparameters['input_channels'], self.hyperparameters['output_channels'])
-        if torch.cuda.device_count() > 1 and self.hyperparameters['multi_gpu']:
-            print(f'Using {torch.cuda.device_count()} GPUs')
-            blobsfinder = nn.DataParallel(blobsfinder)
-            deepgru = nn.DataParallel(deepgru)
-            resnet = nn.DataParallel(resnet)
-        blobsfinder = blobsfinder.to(self.device)
-        deepgru = deepgru.to(self.device)
-        resnet = resnet.to(self.device)
-
-        if self.hyperparameters['optimizer'] == 'Adam':
-            blobsfinder_optimizer = torch.optim.Adam(blobsfinder.parameters(), lr=self.hyperparameters['blobsfinder_learning_rate'], 
-                                         weight_decay=self.hyperparameters['weight_decay'])
-            deepgru_optimizer = torch.optim.Adam(deepgru.parameters(), lr=self.hyperparameters['deepgru_learning_rate'], 
-                                         weight_decay=self.hyperparameters['weight_decay'])
-            resnet_optimizer = torch.optim.Adam(resnet.parameters(), lr=self.hyperparameters['resnet_learning_rate'], 
-                                         weight_decay=self.hyperparameters['weight_decay'])
-        elif self.hyperparameters['optimizer'] == 'SGD':
-            blobsfinder_optimizer = torch.optim.SGD(blobsfinder.parameters(), lr=self.hyperparameters['blobsfinder_learning_rate'], 
-                                    momentum=0.9)
-            deepgru_optimizer = torch.optim.SGD(deepgru.parameters(), lr=self.hyperparameters['deepgru_learning_rate'], 
-                                    momentum=0.9)
-            resnet_optimizer = torch.optim.SGD(resnet.parameters(), lr=self.hyperparameters['resnet_learning_rate'], 
-                                    momentum=0.9)
-        blobsfinder_criterion = self.select_criterion(self.hyperparameters['blobsfinder_criterion'])
-        deepgru_criterion = self.select_criterion(self.hyperparameters['deepgru_criterion'])
-        resnet_criterion = self.select_criterion(self.hyperparameters['resnet_criterion'])
+        
         print('Loading Checkpoints for all models')
-        blobsfinder_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['blobsfinder_name'] + ".pt"))
-        deepgru_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['deepgru_name'] + ".pt"))
-        resnet_fwhmx_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_fwhmx_name'] + ".pt"))
-        resnet_fwhmy_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_fwhmy_name'] + ".pt"))
-        resnet_pa_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_pa_name'] + ".pt"))
-        resnet_flux_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_flux_name'] + ".pt"))
-        blobsfinder, _, _ = load_checkpoint(blobsfinder, blobsfinder_optimizer, blobsfinder_outpath)
-        deepgru, _, _ = load_checkpoint(deepgru, deepgru_optimizer, deepgru_outpath)
-        resnet_fwhmx, _, _ = load_checkpoint(resnet, resnet_optimizer, resnet_fwhmx_outpath)
-        resnet_fwhmy, _, _ = load_checkpoint(resnet, resnet_optimizer, resnet_fwhmy_outpath)
-        resnet_pa, _, _ = load_checkpoint(resnet, resnet_optimizer, resnet_pa_outpath)
-        resnet_flux, _, _ = load_checkpoint(resnet, resnet_optimizer, resnet_flux_outpath)
+        
+        blobsfinder, _, _ = load_checkpoint(self.blobsfinder, 
+                                self.blobsfinder_optimizer, 
+                                self.blobsfinder_outpath)
+        deepgru, _, _ = load_checkpoint(self.deepgru, 
+                                self.deepgru_optimizer, 
+                                self.deepgru_outpath)
+        resnet_fwhmx, _, _ = load_checkpoint(self.resnet, 
+                                self.resnet_optimizer, 
+                                self.resnet_fwhmx_outpath)
+        resnet_fwhmy, _, _ = load_checkpoint(self.resnet, 
+                                self.resnet_optimizer, 
+                                self.resnet_fwhmy_outpath)
+        resnet_pa, _, _ = load_checkpoint(self.resnet, 
+                                self.resnet_optimizer, 
+                                self.resnet_pa_outpath)
+        resnet_flux, _, _ = load_checkpoint(self.resnet, 
+                                self.resnet_optimizer, 
+                                self.resnet_flux_outpath)
         train_dataset = ld.ALMADataset('train_params.csv', self.train_dir, 
                                                 transform=self.test_compose)
         valid_dataset = ld.ALMADataset('valid_params.csv', self.valid_dir, 
@@ -948,6 +1347,22 @@ class Pipeline(object):
                              entity=self.hyperparameters['entity'], 
                              config=self.hyperparameters):
                 config = wandb.config
+                deepgru_train_loader = self.get_spectral_loader_from_blobsfinder_predictions(
+                    blobsfinder, train_dataset, train_loader, self.blobsfinder_criterion, config, False
+                )
+                deepgru_valid_loader = self.get_spectral_loader_from_blobsfinder_predictions(
+                    blobsfinder, valid_dataset, valid_loader, self.blobsfinder_criterion, config, False
+                )
+                deepgru_test_loader = self.get_spectral_loader_from_blobsfinder_predictions(
+                    blobsfinder, test_dataset, test_loader, self.blobsfinder_criterion, config, True
+                )
+                self.train_model(deepgru, deepgru_train_loader, deepgru_valid_loader, config)
+
+
+
+
+                
+
                 
         
                 
