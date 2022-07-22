@@ -29,6 +29,8 @@ import models.deepgru as dg
 import matplotlib
 from astropy.io import fits
 from torch.utils.data import TensorDataset, DataLoader
+from photutils.aperture import CircularAnnulus, CircularAperture
+from scipy.ndimage import binary_dilation, generate_binary_structure
 matplotlib.rcParams.update({'font.size': 12})
 # Ensure deterministic behavior
 torch.backends.cudnn.deterministic = True
@@ -145,7 +147,7 @@ def valid_log(loss):
 def test_log(loss):
     wandb.log({"test_loss": loss})
 
-def param_selector(y, param):
+def param_selector(y, param):     
     if param == 'x':
         return y[:, 0][:, None]
     elif param == 'y':
@@ -389,7 +391,7 @@ def test(model, test_loader, criterion, config, device):
         if config['model'] == 'spectral':
             for b in range(len(outputs)):
                 tspectrum = targets[b, 3:127, 0].cpu().detach().numpy()
-                pspectrum = targets[b, 3:127, 0].cpu().detach().numpy()
+                pspectrum = outputs[b, 3:127, 0].cpu().detach().numpy()
                 min_, max_ = np.min(pspectrum), np.max(pspectrum)
                 tmin_, tmax_ = np.min(tspectrum), np.max(tspectrum)
                 y = (pspectrum - min_) / (max_ - min_)
@@ -694,7 +696,17 @@ class Pipeline(object):
         self.resnet_pa_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_pa_name'] + ".pt"))
         self.resnet_flux_outpath = os.sep.join((self.hyperparameters['output_dir'], self.hyperparameters['resnet_flux_name'] + ".pt"))
     
+    def train_log(self, loss, optimizer, epoch, model_selector):
+    # Where the magic happens
+        wandb.log({"epoch": epoch, model_selector + "_train_loss": loss, model_selector + '_learning_rate': optimizer.param_groups[0]['lr']}))
     
+    def valid_log(self, loss, model_selector):
+        # Where the magic happens
+            wandb.log({model_selector + "_valid_loss": loss})
+
+    def test_log(self, loss, model_selector):
+        wandb.log({model_selector + "_test_loss": loss})
+
     def make(self, config):
         if config['model'] == 'blobsfinder':
             if config['mode'] == 'train':
@@ -760,7 +772,7 @@ class Pipeline(object):
         else:
             return test_loader
 
-    def train_model(self, model, train_loader, valid_loader, config):
+    def train_model(self, model, model_optimizer, model_criterion, train_loader, valid_loader, config, model_outpath, model_selector):
         example_ct = 0
         best_loss = 9999
         # initialize the early_stopping object
@@ -772,33 +784,22 @@ class Pipeline(object):
             for i_batch, batch in tqdm(enumerate(train_loader)):
                 inputs = batch[0].to(self.device)
                 targets = batch[1]
-                if config['model'] == 'resnet':
+                if model_selector == 'resnet':
                     targets = param_selector(targets, config['param']).to(self.device)
                 targets.to(self.device)
-                if config['model'] == 'spectral':
+                if model_selector == 'spectral':
                     inputs = normalize_spectra(inputs)
                     targets = normalize_spectra(targets)
-                if config['model'] == 'blobsfinder':
-                    loss, outputs = train_batch(inputs, targets, model, 
-                                    self.blobsfinder_optimizer, self.blobsfinder_criterion)
-                    train_log(loss, self.blobsfinder_optimizer, epoch)
-                if config['model'] == 'spectral':
-                    self.deepgru.train()
-                    loss, outputs = train_batch(inputs, targets, model, 
-                                    self.deepgru_optimizer, self.deepgru_criterion)
-                    train_log(loss, self.deepgru_optimizer, epoch)
-                if config['model'] == 'resnet':
-                    self.resnet.train()
-                    loss, outputs = train_batch(inputs, targets, model, 
-                                    self.resnet_optimizer, self.resnet_criterion)
-                    train_log(loss, self.resnet_optimizer, epoch)
+
+                loss, outputs = train_batch(inputs, targets, model, model_optimizer, model_criterion)
+                self.train_log(loss, model_optimizer, epoch, model_selector)
                 example_ct += len(inputs)
                 if i_batch == len(train_loader) - 1:
-                    if config['model'] == 'blobsfinder':
+                    if model_selector == 'blobsfinder':
                         log_images(inputs, outputs, targets, 'Train')
-                    if config['model'] == 'spectral':
+                    if model_selector == 'spectral':
                         log_spectra(inputs, outputs, targets, 'Train')
-                    if config['model'] == 'resnet':
+                    if model_selector == 'resnet':
                         log_parameters(outputs, targets, 'Train', config)
                 running_loss += loss.item() * inputs.size(0)
             epoch_loss = running_loss / len(train_loader.dataset)
@@ -811,26 +812,20 @@ class Pipeline(object):
                 for i_batch, batch in tqdm(enumerate(valid_loader)):
                     inputs = batch[0].to(self.device)
                     targets = batch[1]
-                    if config['model'] == 'resnet':
+                    if model_selector == 'resnet':
                         targets = param_selector(targets, config['param']).to(self.device)
                     targets.to(self.device)
-                    if config['model'] == 'spectral':
+                    if model_selector == 'spectral':
                         inputs = normalize_spectra(inputs)
                         targets = normalize_spectra(targets)
-                    if config['model'] == 'blobsfinder':
-                        loss, outputs = valid_batch(inputs, targets, model,
-                                         self.blobsfinder_optimizer, self.blobsfinder_criterion)
-                        valid_log(loss)
+                    loss, outputs = valid_batch(inputs, targets, model,
+                                         model_optimizer, model_criterion)
+                    self.valid_log(loss, model_selector)
+                    if model_selector == 'blobsfinder':
                         log_images(inputs, outputs, targets, 'Train')
-                    if config['model'] == 'spectral':
-                        loss, outputs = valid_batch(inputs, targets, model,
-                                         self.deepgru_optimizer, self.deepgru_criterion)
-                        valid_log(loss)
+                    if model_selector == 'spectral':
                         log_spectra(inputs, outputs, targets, 'Train')
-                    if config['model'] == 'resnet':
-                        loss, outputs = valid_batch(inputs, targets, model,
-                                         self.resnet_optimizer, self.resnet_criterion)
-                        valid_log(loss)
+                    if model_selector == 'resnet':
                         log_parameters(outputs, targets, 'Train', config)
                     running_loss += loss.item() * inputs.size(0)
                     valid_losses.append(loss.item())
@@ -838,42 +833,12 @@ class Pipeline(object):
             epoch_loss = running_loss / len(valid_loader.dataset)
             print(f"Validation Loss {epoch_loss}")
             if config['early_stopping']:
-                if config['model'] == 'blobsfinder':
-                    early_stopping(valid_loss, model, self.blobsfinder_optimizer, 
-                            self.blobsfinder_outpath, epoch)
-                if config['model'] == 'spectral':
-                    early_stopping(valid_loss, model, self.deepgru_optimizer, 
-                            self.deepgru_outpath, epoch)
-                if config['model'] == 'resnet':
-                    if config['param'] == 'fwhm_x':
-                        early_stopping(valid_loss, model, self.resnet_optimizer, 
-                            self.resnet_fwhmx_outpath, epoch)
-                    if config['param'] == 'fwhm_y':
-                        early_stopping(valid_loss, model, self.resnet_optimizer, 
-                            self.resnet_fwhmy_outpath, epoch)
-                    if config['param'] == 'pa':
-                        early_stopping(valid_loss, model, self.resnet_optimizer, 
-                            self.resnet_pa_outpath, epoch)
-                    if config['param'] == 'flux':
-                        early_stopping(valid_loss, model, self.resnet_optimizer, 
-                            self.resnet_flux_outpath, epoch)
-
+                 early_stopping(valid_loss, model, model_optimizer, model_outpath)
             else:
                 if epoch_loss < best_loss:
                     best_loss = epoch_loss
-                    if config['model'] == 'blobsfinder':
-                        save_checkpoint(model, self.blobsfinder_optimizer, self.blobsfinder_outpath, epoch)
-                    if config['model'] == 'spectral':
-                        save_checkpoint(model, self.deepgru_optimizer, self.deepgru_outpath, epoch)
-                    if config['model'] == 'resnet':
-                        if config['param'] == 'fwhm_x':
-                            save_checkpoint(model, self.resnet_optimizer, self.resnet_fwhmx_outpath, epoch)
-                        if config['param'] == 'fwhm_y':
-                            save_checkpoint(model, self.resnet_optimizer, self.resnet_fwhmy_outpath, epoch)
-                        if config['param'] == 'pa':
-                            save_checkpoint(model, self.resnet_optimizer, self.resnet_pa_outpath, epoch)
-                        if config['param'] == 'flux':
-                            save_checkpoint(model, self.resnet_optimizer, self.resnet_flux_outpath, epoch)    
+                    save_checkpoint(model, model_optimizer, model_outpath, epoch) 
+            model, _, _ = load_checkpoint(model, model_optimizer, model_outpath)
             return model
 
     def test_model(self, model, test_loader, config):
@@ -1062,11 +1027,25 @@ class Pipeline(object):
                 train_loader, valid_loader, test_loader = self.make(config)
                 print('Training...')
                 if config['model'] == 'boobsfinder':
-                    self.train_model(self.blobsfinder, train_loader, valid_loader, config)
+                    self.train_model(self.blobsfinder, self.blobsfinder_optimizer, self.blobsfinder_criterion, 
+                             train_loader, valid_loader, config, self.blobsfinder_outpath, config['model'])
                 if config['model'] == 'spectral':
-                    self.train_model(self.deepgru, train_loader, valid_loader, config)
+                    self.train_model(self.deepgru, self.deepgru_optimizer, self.deepgru_optimizer, train_loader,
+                                 valid_loader, config, self.deepgru_outpath, config['model'])
                 if config['model'] == 'resnet':
-                    self.train_model(self.resnet, train_loader, valid_loader, config)
+                    if config['param'] == 'fwhm_x':
+                        self.train_model(self.resnet, self.resnet_optimizer, self.resnet_criterion, train_loader,
+                                 valid_loader, config, self.resnet_fwhmx_outpath, config['model'])
+                    if config['param'] == 'fwhm_y':
+                        self.train_model(self.resnet, self.resnet_optimizer, self.resnet_criterion, train_loader,
+                                 valid_loader, config, self.resnet_fwhmy_outpath, config['model'])
+                    if config['param'] == 'pa':
+                        self.train_model(self.resnet, self.resnet_optimizer, self.resnet_criterion, train_loader,
+                                 valid_loader, config, self.resnet_pa_outpath, config['model'])
+                    if config['param'] == 'flux':
+                        self.train_model(self.resnet, self.resnet_optimizer, self.resnet_criterion, train_loader,
+                                 valid_loader, config, self.resnet_flux_outpath, config['model'])
+
                 print('Testing...')
                 if config['model'] == 'resnet':
                     tgs, pds, res = self.test_model(self.resnet, test_loader, config)
@@ -1197,6 +1176,30 @@ class Pipeline(object):
                 criterion = SSIMLoss(window_size=3)
         return criterion
 
+    def measure_snr(self, img, box):
+        y0, x0, y1, x1 = box
+        xc, yc = img.shape[0] // 2,  img.shape[1] // 2
+        r0, r1 = 1.6 * (x1 - x0), 2.6 * (x1 - x0)
+        r = 0.5 * (x1 - x0)
+
+        noise_aperture = CircularAnnulus((xc, yc), r0 / 2, r1 / 2 )
+        mask = noise_aperture.to_mask(method='center')
+
+        source_aperture = CircularAperture((xc, yc), r)
+        aperture_mask = source_aperture.to_mask()
+
+        noise_p = mask.multiply(img)
+        noise_p = noise_p[mask.data > 0]
+        source_p = aperture_mask.multiply(img)
+        source_p = source_p[aperture_mask.data > 0.]
+        std = np.std(noise_p)
+        mean = np.median(source_p)
+        snr = mean / std
+        return snr
+    
+    def SNRMap(self, img):
+        return img / (np.std(img) **2)
+
     def get_spectral_loader_from_blobsfinder_predictions(self, model, dataset, loader, criterion, config, test=True):
         model.eval()
         dirty_list = dataset.dirty_list
@@ -1216,7 +1219,7 @@ class Pipeline(object):
             targets = batch[1].to(self.device)
             target_boxes =  batch[2]
             targets = targets.to(self.device)
-            idxs = batch[3]
+            idxs = batch[4]
             loss, outputs = test_batch(inputs, targets, model, criterion)
             for b in tqdm(range(len(outputs))):
                 output = outputs[b, 0].cpu().detach().numpy()
@@ -1308,6 +1311,416 @@ class Pipeline(object):
                                   pin_memory=True, shuffle=True)
         return loader
 
+    def get_focussed_loader_from_deepgru_predictions(self, model1, model2, dataset, loader, criterion1, criterion2, config):
+        model1.eval()
+        model2.eval()
+        dirty_list = dataset.dirty_list
+        clean_list = dataset.clean_list
+        parameters = dataset.parameters
+        targs = []
+        true_x = []
+        true_y = []
+        predicted_x = []
+        predicted_y = []
+        true_z = []
+        predicted_z = []
+        spectra = []
+        dspectra = []
+        true_extension = []
+        predicted_extension = []
+        focused = []
+        t = 0
+        fp = 0
+        for i_batch, batch in tqdm(enumerate(loader)):
+            inputs = batch[0].to(self.device)
+            targets = batch[1].to(self.device)
+            target_boxes =  batch[2]
+            targets = targets.to(self.device)
+            idxs = batch[3]
+            # batch of images 
+            loss, outputs = test_batch(inputs, targets, model1, criterion1)
+            for b in tqdm(range(len(outputs))):
+                output = outputs[b, 0].cpu().detach().numpy()
+                #get the cubes and the parameters
+                dirty_name = dirty_list[idxs[b]]
+                clean_name = clean_list[idxs[b]]
+                db_idx = float(dirty_name.split('_')[-1].split('.')[0])
+                params = parameters.loc[parameters.ID == db_idx]
+                boxes = np.array(params[["y0", "x0", "y1", "x1"]].values)
+                z_ = np.array(params["z"].values)
+                fwhm_z = np.array(params["fwhm_z"].values)
+                extensions = 2 * fwhm_z 
+                targets = np.array(params[["x", "y", "fwhm_x", "fwhm_y", "pa", "flux", 'continuum']].values)
+                targets['z'] = z_
+                targets['extensions'] = extensions
+                dirty_cube = fits.getdata(dirty_name) 
+                clean_cube = fits.getdata(clean_name)
+                min_, max_ = np.min(output), np.max(output)
+                output = (output - min_) / (max_ - min_)
+                tboxes = target_boxes[b]
+                # get the bounding boxes from blobsfinder prediction
+                seg = output.copy()
+                seg[seg > 0.15] = 1
+                seg = seg.astype(int)
+                struct = ndimage.generate_binary_structure(2, 2)
+                seg = binary_dilation(seg, struct)
+                props = regionprops(label(seg, connectivity=2))
+                boxes = []
+                for prop in props:
+                    y0, x0, y1, x1 = prop.bbox
+                    boxes.append([y0, x0, y1, x1])
+                boxes = np.array(boxes)
+                # measure ious between true boxes and predicted boxes
+                ious = box_iou(torch.Tensor(tboxes), torch.Tensor(boxes)).numpy()
+                #get the ious of the maximum intersection for each true box
+                ious = np.max(ious, axis=1)
+                # get the centers
+                txc = tboxes[:, 1] + 0.5 * (tboxes[:, 3] - tboxes[:, 1])
+                tyc = tboxes[:, 0] + 0.5 * (tboxes[:, 2] - tboxes[:, 0])
+                xc = boxes[:, 1] + 0.5 * (boxes[:, 3] - boxes[:, 1])
+                yc = boxes[:, 0] + 0.5 * (boxes[:, 2] - boxes[:, 0])
+                # measure distance between centers
+                dists = []
+                for j in range(len(txc)):
+                    d = []
+                    for k in range(len(xc)):
+                        d.append(np.sqrt((txc[j] - xc[k])**2 + (tyc[j] - yc[k])**2))
+                    dists.append(d)
+                dists = np.array(dists)
+                idxs = np.argmin(dists, axis=1)
+                dists = np.min(dists, axis=1)
+                # if the matching criterium is meet, add the source to the predicted
+                for i in range(len(dists)):
+                    if ious[i] >= config['twoD_iou_threshold'] and dists[i] <= config['twoD_dist_threshold']:
+                        true_x.append(txc[i])
+                        true_y.append(tyc[i])
+                        predicted_x.append(xc[idxs[i]])
+                        predicted_y.append(yc[idxs[i]])
+                        t += 1
+                # keep trace of false positives
+                if len(boxes) > len(tboxes):
+                    fp += len(boxes) - len(tboxes)
+
+                # extract spectra from bounding boxes
+                dirty_spectra = np.array([
+                    np.sum(dirty_cube[0][:, boxes[j][0]: boxes[j][2], boxes[j][1]: boxes[j][3]], axis=(1, 2))
+                    for j in range(len(boxes))
+                    ])
+                clean_spectra = np.array([
+                    np.sum(clean_cube[0][:, boxes[j][0]: boxes[j][2], boxes[j][1]: boxes[j][3]], axis=(1, 2))
+                    for j in range(len(boxes))
+                    ])
+                # standardize spectra and rebatching
+                for j in range(len(dirty_spectra)):
+                    targs.append(targets[j])
+                    dspec = dirty_spectra[j]
+                    dspec = (dspec - np.mean(dspec)) / np.std(dspec)
+                    spec = clean_spectra[j]
+                    spec = (spec - np.mean(spec)) / np.std(spec)
+                    spectra.append(spec)
+                    dspectra.append(dspec)
+            
+            # get the spectra and targets in the right format
+            dspectra = torch.Tensor(ld.normalize_spectra(np.transpose(dspectra[np.newaxis], 
+                                        axes=(1, 2, 0)))).to(self.device)
+            spectra = torch.Tensor(ld.normalize_spectra(np.transpose(spectra[np.newaxis], 
+                                        axes=(1, 2, 0)))).to(self.device)
+            targs = torch.Tensor(np.array(targs))
+            targ_idxs = np.arange(targs.shape[0])
+            # get deepgru predictions
+            loss, outputs = test_batch(dspectra, spectra, model2, criterion2)
+            # extract peaks from predictions
+            for b1 in range(len(outputs)):
+                tspectrum = spectra[b1, 3:127, 0].cpu().detach().numpy()
+                pspectrum = outputs[b1, 3:127, 0].cpu().detach().numpy()
+                min_, max_ = np.min(pspectrum), np.max(pspectrum)
+                tmin_, tmax_ = np.min(tspectrum), np.max(tspectrum)
+                y = (pspectrum - min_) / (max_ - min_)
+                ty = (tspectrum -tmin_) / (tmax_ - tmin_)
+                x = np.array(range(len(y)))
+                peaks, _ = find_peaks(y, height=np.mean(y) + 0.1, prominence=0.05, distance=10)
+                peaks_amp = y[peaks]
+                x_peaks = x[peaks]
+                tpeaks, _ = find_peaks(ty, height=0.0, prominence=0.05, distance=10)
+                tpeaks_amp = ty[tpeaks]
+                tx_peaks = x[tpeaks]
+                lims = []
+                idxs = []
+                for i_peak, peak in enumerate(x_peaks):
+                    g1 = models.Gaussian1D(amplitude=peaks_amp[i_peak], mean=peak, stddev=3)
+                    fit_g = fitting.LevMarLSQFitter()
+                    if peak >= 10 and peak <= 118:
+                        g = fit_g(g1, x[peak - 10: peak + 10], y[peak - 10: peak + 10])
+                    elif peak < 10:
+                        g = fit_g(g1, x[0: peak + 10], y[0: peak + 10])
+                    else:
+                        g = fit_g(g1, x[peak - 10: peak + 128 - peak], y[peak - 10: peak + 128 - peak])
+                    m, dm = int(g.mean.value), int(g.fwhm)
+                    if dm <= 64:        
+                        lims.append([int(x_peaks[i_peak]) - dm, int(x_peaks[i_peak]) + dm])
+                        idxs.append(i_peak)
+                tlims = []
+                tidxs = []
+                for i_peak, peak in enumerate(tx_peaks):
+                    g1 = models.Gaussian1D(amplitude=tpeaks_amp[i_peak], mean=peak, stddev=3)
+                    fit_g = fitting.LevMarLSQFitter()
+                    if peak >= 10 and peak <= 118:
+                        g = fit_g(g1, x[peak - 10: peak + 10], y[peak - 10: peak + 10])
+                    elif peak < 10:
+                        g = fit_g(g1, x[0: peak + 10], y[0: peak + 10])
+                    else:
+                        g = fit_g(g1, x[peak - 10: peak + 128 - peak], y[peak - 10: peak + 128 - peak])
+                    m, dm = int(g.mean.value), int(g.fwhm)
+                    if dm <= 64 and int(tx_peaks[i_peak]) - dm >= 0 and int(tx_peaks[i_peak]) + dm <= 128:
+                        tlims.append([int(tx_peaks[i_peak]) - dm, int(tx_peaks[i_peak]) + dm])
+                        tidxs.append(i_peak)
+                if len(lims) > 0:
+                    x_peaks = x_peaks[idxs]
+                    peaks_amp = peaks_amp[idxs]     
+                if len(tlims) > 0:
+                    tx_peaks = tx_peaks[tidxs]
+                    tpeaks_amp = tpeaks_amp[tidxs]
+                    ious = []
+                
+                if len(tlims) > 0 and len(lims) > 0:
+                    dists = []
+                    for j in range(len(tx_peaks)):
+                        d = []
+                        for k in range(len(x_peaks)):
+                            d.append(np.sqrt((tx_peaks[j] - x_peaks[k]) ** 2))
+                        dists.append(d)
+                    dists = np.array(dists)
+                    min_idxs = np.argmin(dists, axis=1)
+                    dists = np.min(dists, axis=1)
+                    for it, tlim in enumerate(tlims):
+                        idx = min_idxs[it]
+                        ious.append(iou(tlims[it], lims[idx]))
+                    ious = np.array(ious)
+                    for i in range(len(dists)):
+                        if ious[i] >= config['oneD_iou_threshold'] and dists[i] <= config['oneD_dist_threshold']:
+                            t += 1
+                            true_z.append(tx_peaks[i])
+                            predicted_z.append(x_peaks[min_idxs[i]])
+                            true_extension.append(tlims[i][1] - tlims[i][0])
+                            predicted_extension.append(lims[min_idxs[i]][1] -lims[min_idxs[i]][0])
+    
+                    if len(x_peaks) > len(tx_peaks):
+                        fp += len(x_peaks) - len(tx_peaks)
+                # for each peak we extract a focused image if some conditions are met
+                box = boxes[b]
+                y_0, x_0, y_1, x_1 = box
+                width_x, width_y = x_1 - x_0, y_1 - y_0
+                x, y = x_0 + 0.5 * width_x, y_0 + 0.5 * width_y
+                for i in range(len(lims)):
+                    z_0, z_1 = lims[i]
+                    source = np.sum(dirty_cube[0][z_0:z_1, int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+                    reference = np.sum(dirty_cube[0][:,int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+                    xsize, ysize = int(source.shape[0]), int(source.shape[1])
+                    dx, dy = xsize - 64, ysize - 64
+                    if dx % 2 == 0:
+                        left, right = dx // 2, xsize - dx // 2
+                    else:
+                        left, right = dx // 2, xsize - dx // 2 - 1
+                    if dy % 2 == 0:
+                        bottom, top = dy // 2, ysize - dy // 2
+                    else:
+                        bottom, top = dy // 2, ysize - dy // 2 - 1
+                    source = source[left:right, bottom:top]
+                    reference = reference[left:right, bottom:top]
+                    #measure snrs
+                    snr = self.measure_snr(source, box)
+                    rsnr = self.measure_snr(reference, box)
+                    snrmap = self.SNRMap(source)
+                    snrmax = np.argmax(snrmap)
+                    rsnrmap = self.SNRMap(reference)
+                    rsnrmax = np.argmax(rsnrmap)
+                    if rsnr >= 6:
+                        min_, max_ = np.min(source), np.max(source)
+                        source = (source - min_) / (max_ - min_)
+                        focused.append(source)
+                    else:
+                        if snrmax != rsnrmax:
+                            min_, max_ = np.min(source), np.max(source)
+                            source = (source - min_) / (max_ - min_)
+                            model = source.copy()
+                            model[model > 0.15] = 1
+                            model = model.astype(int)
+                            struct = generate_binary_structure(2, 2)
+                            model = binary_dilation(model, struct)
+                            props = regionprops(label(model, connectivity=2))
+                            ny0, nx0, ny1, nx1 = props.bbox
+                            width = nx1 - nx0
+                            height = ny1 - ny0
+                            nxc = nx0 + 0.5 * width
+                            nyc = ny0 + 0.5 * height
+                            nx = x + (32 - nxc)
+                            ny = y + (32 - nyc)
+                            source = np.sum(dirty_cube[0][z_0:z_1, int(ny) - 32: int(ny) + 32, int(nx) - 32: int(nx) + 32], axis=0)
+                            xsize, ysize = int(source.shape[0]), int(source.shape[1])
+                            dx, dy = xsize - 64, ysize - 64
+                            if dx % 2 == 0:
+                                left, right = dx // 2, xsize - dx // 2
+                            else:
+                                left, right = dx // 2, xsize - dx // 2 - 1
+                            if dy % 2 == 0:
+                                bottom, top = dy // 2, ysize - dy // 2
+                            else:
+                                bottom, top = dy // 2, ysize - dy // 2 - 1
+                            source = source[left:right, bottom:top]
+                            min_, max_ = np.min(source), np.max(source)
+                            source = (source - min_) / (max_ - min_)
+                            focused.append(source)
+                        else:
+                            if snr >= rsnr:
+                                min_, max_ = np.min(source), np.max(source)
+                                source = (source - min_) / (max_ - min_)
+                                focused.append(source)
+            
+        
+    def normalize_image(self, img):
+        min_, max_ = np.min(img), np.max(img)
+        return (img - min_) / (max_ - min_)
+
+    def get_first_step(self, dataset, loader, config):
+        self.blobsfinder.eval()
+        dirty_list = dataset.dirty_list
+        clean_list = dataset.clean_list
+        parameters = dataset.parameters
+        n_boxes = 0
+        t_sources = 0
+        n_matches = 0
+        p_matches = 0
+        m_sources = 0
+        spectra = []
+        dspectra = []
+        master_targs = []
+        with torch.no_grad():
+            for i_batch, batch in tqdm(enumerate(loader)):
+                input_images = batch[0].to(self.device)
+                target_images = batch[1].to(self.device)
+                target_boxes = batch[2]
+                target_snrs = batch[3]
+                cube_idxs = batch[4]
+                blobsfinder_loss, output_images = test_batch(input_images, target_images, self.blobsfinder, self.blobsfinder_criterion)
+
+                for b in tqdm(range(len(output_images))):
+                    #normalize predeicted image
+                    predicted_image = self.normalize_image(output_images[b, 0].cpu().detach().numpy())
+                    tboxes = target_boxes[b]
+                    dirty_name = dirty_list[cube_idxs[b]]
+                    clean_name = clean_list[cube_idxs[b]]
+                    dirty_cube = fits.getdata(dirty_name) 
+                    clean_cube = fits.getdata(clean_name)
+                    db_idx = float(dirty_name.split('_')[-1].split('.')[0])
+                    params = parameters.loc[parameters.ID == db_idx]
+                    targets = params[['ID', "x", "y", "z", "fwhm_x", "fwhm_y", "pa", "flux", 'continuum']]
+                    targets['extensions'] = 2 * params['fwhm_z']
+                    targets = np.array(targets.values)
+                    # extract boxes from predictions 
+                    seg = predicted_image.copy()
+                    seg[seg > 0.15] = 1
+                    seg = seg.astype(int)
+                    struct = ndimage.generate_binary_structure(2, 2)
+                    seg = binary_dilation(seg, struct)
+                    props = regionprops(label(seg, connectivity=2))
+                    boxes = []
+                    for prop in props:
+                        y0, x0, y1, x1 = prop.bbox
+                        boxes.append([y0, x0, y1, x1])
+                    boxes = np.array(boxes)
+                    dirty_spectra = np.array([
+                        np.sum(dirty_cube[0][:, boxes[j][0]: boxes[j][2], boxes[j][1]: boxes[j][3]], axis=(1, 2))
+                        for j in range(len(boxes))
+                        ])
+                    clean_spectra = np.array([
+                        np.sum(clean_cube[0][:, boxes[j][0]: boxes[j][2], boxes[j][1]: boxes[j][3]], axis=(1, 2))
+                        for j in range(len(boxes))
+                         ])
+                    # get the centers
+                    txc = tboxes[:, 1] + 0.5 * (tboxes[:, 3] - tboxes[:, 1])
+                    tyc = tboxes[:, 0] + 0.5 * (tboxes[:, 2] - tboxes[:, 0])
+                    xc = boxes[:, 1] + 0.5 * (boxes[:, 3] - boxes[:, 1])
+                    yc = boxes[:, 0] + 0.5 * (boxes[:, 2] - boxes[:, 0])
+                    # measure distance between centers
+                    dists = []
+                    for j in range(len(xc)):
+                        d = []
+                        for k in range(len(txc)):
+                            d.append(np.sqrt((xc[j] - txc[k])**2 + (yc[j] - tyc[k])**2))
+                    dists = np.array(dists)
+                    ious = box_iou(torch.Tensor(boxes), torch.Tensor(tboxes)).numpy()
+                    #get the ious of the maximum intersection for each true box
+                    boxes_targets = []
+                    matches = np.zeros(dists.shape)
+                    for j in range(len(boxes)):
+                        for k in range(len(tboxes)):
+                            if dists[j][k] <= config['twoD_dist_threshold'] and ious[j][k] >= config['twoD_iou_threshold']:
+                                boxes_targets.append(targets[k])
+                                matches[j][k] = 1
+                            elif xc[j] >  tboxes[k][1] and xc[j] < tboxes[k][3] and yc[j] > tboxes[k][0] and yc[j] < tboxes[k][2]:
+                                matches[j][k] = 0.5
+                                boxes_targets.append(targets[k])
+
+                            else:
+                                boxes_targets.append(np.zeros(targets[k].shape))
+                    n_boxes += len(boxes)        
+                    t_count = np.sum(matches, axis=0)
+                    n_matches += len(np.where(t_count > 0.5)[0])
+                    p_matches += len(np.where(t_count > 0.)[0])
+                    t_sources += len(tboxes)
+                    m_sources += len(tboxes) - len(np.where(t_count > 0.)[0]) 
+                    boxes_targets = np.array(boxes_targets)
+                    boxes_targets = np.append(boxes_targets, xc, axis=1)
+                    boxes_targets = np.aappend(boxes_targets, yc, axis=1)
+                    for j in range(len(dirty_spectra)):
+                        dspec = dirty_spectra[j]
+                        dspec = (dspec - np.mean(dspec)) / np.std(dspec)
+                        spec = clean_spectra[j]
+                        spec = (spec - np.mean(spec)) / np.std(spec)
+                        spectra.append(spec)
+                        dspectra.append(dspec)
+                        master_targs.append(boxes_targets[j])
+        
+        spectra = np.array(spectra)
+        dspectra = np.array(dspectra)
+        master_targs = np.array(master_targs)
+        dspectra = np.transpose(dspectra[np.newaxis], 
+                                        axes=(1, 2, 0))
+        spectra = np.transpose(spectra[np.newaxis], 
+                                        axes=(1, 2, 0)) 
+        dataset = TensorDataset(torch.Tensor(dspectra), torch.Tensor(spectra), torch.Tensor(master_targs))
+        if test:
+            loader = DataLoader(dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                                  pin_memory=True, shuffle=False)
+        else:  
+            loader = DataLoader(dataset, batch_size=config['batch_size'], num_workers=os.cpu_count(), 
+                                  pin_memory=True, shuffle=True)
+        
+        print('Number of boxes found: ', n_boxes)
+        print('Number of true sources in the data: ', t_sources)
+        print('Missed Sources: ', m_sources)
+        print('Direct Matches: ', n_matches)
+        print('Potential Sources: ', p_matches)
+        return loader, n_boxes, t_sources, n_matches, p_matches, m_sources                     
+
+
+    def get_second_step(self, dataset, loader, config, t_p_matches):
+        self.deepgru.eval()
+        dirty_list = dataset.dirty_list
+        clean_list = dataset.clean_list
+        parameters = dataset.parameters
+        focused = []
+        targets = []
+        with torch.no_grad():
+            for i_batch, batch in tqdm(enumerate(loader)):
+                input_spectra = normalize_spectra(batch[0].to(self.device))
+                target_spectra = normalize_spectra(batch[1].to(self.device))
+                master_targets = batch[2]
+                loss, output_spectra = test_batch(input_spectra, target_spectra, self.deepgru, self.deepgru_criterion)
+                
+
+
+
     def train_and_test_pipeline(self):
         
         print('Loading Checkpoints for all models')
@@ -1347,16 +1760,15 @@ class Pipeline(object):
                              entity=self.hyperparameters['entity'], 
                              config=self.hyperparameters):
                 config = wandb.config
-                deepgru_train_loader = self.get_spectral_loader_from_blobsfinder_predictions(
-                    blobsfinder, train_dataset, train_loader, self.blobsfinder_criterion, config, False
-                )
-                deepgru_valid_loader = self.get_spectral_loader_from_blobsfinder_predictions(
-                    blobsfinder, valid_dataset, valid_loader, self.blobsfinder_criterion, config, False
-                )
-                deepgru_test_loader = self.get_spectral_loader_from_blobsfinder_predictions(
-                    blobsfinder, test_dataset, test_loader, self.blobsfinder_criterion, config, True
-                )
-                self.train_model(deepgru, deepgru_train_loader, deepgru_valid_loader, config)
+
+                deepgru_train_loader, t_n_boxes, t_t_boxes, t_n_matches, t_p_matches, m_sources  = self.get_first_step(train_dataset, train_loader, config)
+                deepgru_valid_loader, t_n_boxes, t_t_boxes, t_n_matches, t_p_matches, m_sources  = self.get_first_step(valid_dataset, valid_loader, config)
+                deepgru_test_loader, t_n_boxes, t_t_boxes, t_n_matches, t_p_matches, m_sources  = self.get_first_step(test_dataset, test_loader, config)
+                self.deepgru = self.train_model(self.deepgru, self.deepgru_optimizer, self.deepgru_criterion, 
+                            deepgru_train_loader, deepgru_valid_loader, config, self.deepgru_outpath, 'spectral')
+                
+                
+
 
 
 
