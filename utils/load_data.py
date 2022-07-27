@@ -643,7 +643,8 @@ class PipelineDataLoader(object):
             z_ = np.array(params["z"].values)
             fwhm_z = np.array(params["fwhm_z"].values)
             zboxes = np.array([z_ - fwhm_z, z_ + fwhm_z]).astype(int).T
-            targets = np.array(params[["x", "y", "fwhm_x", "fwhm_y", "pa", "flux", 'continuum']].values)
+            targets = np.array(params[["ID", "x", "y", "z", "fwhm_x", "fwhm_y", "pa", "flux", 'continuum']].values)
+            targets['extensions'] = 2 * params['fwhm_z']
             dirty_cube = fits.getdata(dirty_name) 
             clean_cube = fits.getdata(clean_name)
             snrs = params['snr'].values
@@ -703,8 +704,8 @@ class PipelineDataLoader(object):
                 line_images.append(line_image[np.newaxis])
                 xs.append(32 - left)
                 ys.append(32 - bottom)
-            targets[:, 0] = xs
-            targets[:, 1] = ys
+            targets[:, 1] = xs
+            targets[:, 2] = ys
             for j in range(len(targets)):
                 targs.append(targets[j])
                 dspec = dirty_spectra[j]
