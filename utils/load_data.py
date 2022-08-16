@@ -1,5 +1,3 @@
-from tkinter import W
-from bleach import clean
 import numpy as np
 import pandas as pd
 import os
@@ -515,16 +513,27 @@ class RandomVerticalFlip(object):
 class ToTensor(object):
     """Convert ndarrays in sample to Tensor"""
 
-    def __init__(self):
+    def __init__(self, model):
+        self.model = model
         pass
 
     def __call__(self, sample):
+        if self.model == 'blobsfinder':
             dirty_image = torch.from_numpy(sample['dirty_img'][np.newaxis, :, :])
             clean_image = torch.from_numpy(sample['clean_img'][np.newaxis, : , :])
             sample['dirty_img'] = dirty_image
             sample['clean_img'] = clean_image
             return sample
-
+        elif self.model == 'spectral':
+            dirty_spectra = torch.from_numpy(sample['dirty_spectra'][:, :, np.newaxis])
+            clean_spectra = torch.from_numpy(sample['clean_spectra'][:, :, np.newaxis])
+            sample['dirty_spectra'] = dirty_spectra
+            sample['clean_speactra'] = clean_spectra
+            return sample
+        elif self.model == 'resnet':
+            focused = torch.from_numpy(sample['focused'][np.newaxis, :, :])
+            sample['focused'] = focused
+            return sample
 class Crop(object):
     """
     Crop the image and bounding boxes in a sample
@@ -558,7 +567,7 @@ class Crop(object):
 
 class ALMADataset(Dataset):
     """ALMA Dataset"""
-    def __init__(self, csv_file, root_dir, transform=None):
+    def __init__(self, csv_file, root_dir, transform=None, model='blobsfinder'):
         """
         Args: 
             csv_file (string): Path with the CSV file containing sources parameters
@@ -572,6 +581,7 @@ class ALMADataset(Dataset):
             os.path.join(self.root_dir, file) for file in os.listdir(self.root_dir) if 'dirty' in file]))
         self.clean_list = np.array(natsorted([
             os.path.join(self.root_dir, file) for file in os.listdir(self.root_dir) if 'clean' in file]))
+        self.model = model
     def __len__(self):
         return len(self.dirty_list)
     
@@ -583,11 +593,19 @@ class ALMADataset(Dataset):
         db_idx = float(clean_name.split('_')[-1].split('.')[0])
         params = self.parameters.loc[self.parameters.ID == db_idx]
         boxes = np.array(params[["y0", "x0", "y1", "x1"]].values)
+        targets = np.array(params[["fwhm_x", "fwhm_y", "pa", "flux"]].values)
+        clean_cube = fits.getdata(clean_name)
+        dirty_cube = fits.getdata(dirty_name)
+        clean_img = np.sum(clean_cube[0], axis=0)
+        dirty_img = np.sum(dirty_cube[0], axis=0)
         snrs = params['snr'].values
-        clean_img = np.sum(fits.getdata(clean_name)[0], axis=0)
-        dirty_img = np.sum(fits.getdata(dirty_name)[0], axis=0)
-        
-        sample = {'dirty_img': dirty_img, 'clean_img': clean_img, 'boxes': boxes, 'snrs': snrs, 'idx': idx}
+        sample = {'dirty_img': dirty_img, 
+                  'clean_img': clean_img, 
+                  'boxes': boxes, 
+                  'snrs': snrs, 
+                  'parameters': targets, 
+                  'dirty_cube': dirty_cube,
+                  'clean_cube': clean_cube}
         if self.transform:
             sample = self.transform(sample)
         return sample
@@ -601,19 +619,22 @@ class ALMADataset(Dataset):
         dirty_images = list()
         boxes = list()
         snrs = list()
-        idxs = list()
+        targets = list()
+        clean_cubes = list()
+        dirty_cubes = list()
         for b in batch:
             clean_images.append(b['clean_img'])
             dirty_images.append(b['dirty_img'])
             boxes.append(b['boxes'])
             snrs.append(b['snrs'])
-            idxs.append(b['idx'])
-            
+            targets.append(b['parameters'])
+            clean_cubes.append(b['clean_cube'])
+            dirty_cubes.append(b['dirty_cube'])
         clean_images = torch.stack(clean_images, dim=0)
         dirty_images = torch.stack(dirty_images, dim=0)
            
-        return dirty_images, clean_images, boxes, snrs
-
+        return dirty_images, clean_images, boxes, snrs, targets, dirty_cubes, clean_cubes
+        
 class PipelineDataLoader(object):
     def __init__(self, csv_file, root_dir):
         """
@@ -725,5 +746,3 @@ class PipelineDataLoader(object):
                                         axes=(1, 2, 0)) 
 
         return spectra, dspectra, focused, targs, line_images    
-
-    
