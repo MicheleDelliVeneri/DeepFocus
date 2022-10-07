@@ -1,3 +1,4 @@
+from tkinter import W
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,6 +26,7 @@ from skimage.measure import regionprops, label
 from kornia.losses import SSIMLoss
 from scipy.signal import find_peaks
 from astropy.modeling import models, fitting
+from photutils.aperture import CircularAnnulus, CircularAperture
 matplotlib.rcParams.update({'font.size': 12})
 torch.backends.cudnn.deterministic = True
 random.seed(hash("setting random seeds") % 2**32 - 1)
@@ -862,6 +864,31 @@ def get_spectra_from_dataloader(config, blobsfinder, bf_criterion, loader, devic
                           pin_memory=True, shuffle=True)
     return loader
 
+def localSNR(img):
+    "This function computes the per pixel SNR map"
+    return np.abs(img / (np.std(img) **2))
+
+def globalSNR(img, box):
+    """
+    This function computes the Global SNR
+    """
+    y0, x0, y1, x1 = box
+    xc, yc = img.shape[0] // 2,  img.shape[1] // 2
+    r0, r1 = 1.6 * (x1 - x0), 2.6 * (x1 - x0)
+    r = 0.5 * (x1 - x0)
+    noise_aperture = CircularAnnulus((xc, yc), r0 / 2, r1 / 2 )
+    mask = noise_aperture.to_mask(method='center')
+    source_aperture = CircularAperture((xc, yc), r)
+    aperture_mask = source_aperture.to_mask()
+    noise_p = mask.multiply(img)
+    noise_p = noise_p[mask.data > 0]
+    source_p = aperture_mask.multiply(img)
+    source_p = source_p[aperture_mask.data > 0.]
+    var = np.std(noise_p) ** 2
+    mean = np.median(source_p)
+    snr = np.abs(mean / var)
+    return snr
+
 def get_focussed_from_dataloader(config, blobsfinder, deepGRU, bf_criterion, dg_criterion, loader, device):
     blobsfinder.eval()
     deepGRU.eval()
@@ -927,8 +954,14 @@ def get_focussed_from_dataloader(config, blobsfinder, deepGRU, bf_criterion, dg_
             y = (spectrum - min_) / (max_ - min_)
             x = np.array(range(len(y)))
             peaks, _ = find_peaks(y, height=np.mean(y) + 0.1, prominence=0.05, distance=10)
-            peaks_amp = y[peaks]
             x_peaks = x[peaks]
+            peaks_amp = y[peaks]
+            # peaks are sorted by amplitude
+            idxs = np.argsort(-peaks_amp)
+            peaks_amp = peaks_amp[idxs]
+            x_peaks = x_peaks[idxs]
+
+            
             lims, idxs = [], []
             #fitting target and output peaks
             fit_g = fitting.LevMarLSQFitter()
@@ -944,22 +977,64 @@ def get_focussed_from_dataloader(config, blobsfinder, deepGRU, bf_criterion, dg_
                 if dm < 64:
                     lims.append([int(x_peaks[i_peak]) - dm, int(x_peaks[i_peak]) + dm])
                     idxs.append(i_peak)
-            for i_peak in range(len(lims)):
-                source = np.sum(dirty_cube[lims[i_peak][0]: lims[i_peak][1], int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
-                xsize, ysize = int(source.shape[0]), int(source.shape[1])
-                dx, dy = xsize - 64, ysize - 64
-                if dx % 2 == 0:
-                    left, right = dx // 2, xsize - dx // 2
-                else:
-                    left, right = dx // 2, xsize - dx // 2 - 1
-                if dy % 2 == 0:
-                    bottom, top = dy // 2, ysize - dy // 2
-                else:
-                    bottom, top = dy // 2, ysize - dy // 2 - 1
-                source = source[left:right, bottom:top]
+            
+            # Source Focusing and SNR reasoning
+
+            # the first and brightest source is focused and checks are made to retain or discard
+            source = np.sum(dirty_cube[lims[0][0]: lims[0][1], int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+            reference = np.sum(dirty_cube[:, int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+            xsize, ysize = int(source.shape[0]), int(source.shape[1])
+            dx, dy = xsize - 64, ysize - 64
+            if dx % 2 == 0:
+                left, right = dx // 2, xsize - dx // 2
+            else:
+                left, right = dx // 2, xsize - dx // 2 - 1
+            if dy % 2 == 0:
+                bottom, top = dy // 2, ysize - dy // 2
+            else:
+                bottom, top = dy // 2, ysize - dy // 2 - 1
+            source = source[left:right, bottom:top]
+            reference = reference[left:right, bottom:top]
+            gsourceSNR = globalSNR(source, boxes[b])
+            greferenceSNR = globalSNR(reference, boxes[b])
+            lprimarySNR = localSNR(source)
+            #detect highest SNR pixel in the image
+            rpix = np.argmax(lprimarySNR)
+            if gsourceSNR >= 6:
                 min_, max_ = np.min(source), np.max(source)
                 source = (source - min_) / (max_ - min_)
                 focussed.append(source[np.newaxis])
+            else:
+                if gsourceSNR >= greferenceSNR:
+                    min_, max_ = np.min(source), np.max(source)
+                    source = (source - min_) / (max_ - min_)
+                    focussed.append(source[np.newaxis])
+            
+            # if there are secondary peaks, then
+            if len(lims) > 1:
+                for i_peak in range(len(lims))[1:]:
+                    source = np.sum(dirty_cube[lims[i_peak][0]: lims[i_peak][1], int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+                    reference = np.sum(dirty_cube[:, int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+                    xsize, ysize = int(source.shape[0]), int(source.shape[1])
+                    dx, dy = xsize - 64, ysize - 64
+                    if dx % 2 == 0:
+                        left, right = dx // 2, xsize - dx // 2
+                    else:
+                        left, right = dx // 2, xsize - dx // 2 - 1
+                    if dy % 2 == 0:
+                        bottom, top = dy // 2, ysize - dy // 2
+                    else:
+                        bottom, top = dy // 2, ysize - dy // 2 - 1
+                    source = source[left:right, bottom:top]
+                    reference = reference[left:right, bottom:top]
+                    gsourceSNR = globalSNR(source, boxes[b])
+                    greferenceSNR = globalSNR(reference, boxes[b])
+                    lSNR = localSNR(source)
+                    pix = np.argmax(lSNR)
+                    if pix != rpix and gsourceSNR >= greferenceSNR:
+                        min_, max_ = np.min(source), np.max(source)
+                        source = (source - min_) / (max_ - min_)
+                        focussed.append(source[np.newaxis])
     focussed = np.array(focussed)
     parameters = np.array(parameters)
     dataset = TensorDataset(torch.Tensor(focussed), torch.Tensor(parameters))   
@@ -968,6 +1043,13 @@ def get_focussed_from_dataloader(config, blobsfinder, deepGRU, bf_criterion, dg_
     return loader
 
 def train_on_predictions(config, device):
+    """
+    This function train each model on the predictions from the previous ones.
+    Inputs:
+    config: the dictionary containing the configuration parameters;
+    device: the name of the device to use for training the models;
+
+    """
     output_dir = config['output_dir']
     if not os.path.exists(output_dir):
         os.mkdir(output_dir)
@@ -1045,3 +1127,222 @@ def train_on_predictions(config, device):
     config['param'] = 'flux'
     flux_resnet = train(flux_resnet, train_resnet_loader, valid_resnet_loader, resnet_criterion, 
                     resnet_optimizer, config, 'resnet_flux_deepGRUpreds', device)
+
+def run_pipeline(config, device):
+    predictions = []
+    output_dir = config['output_dir']
+    if not os.path.exists(output_dir):
+        os.mkdir(output_dir)
+    test_dir = config['data_folder'] + 'Test/'
+    crop = ld.Crop(256)
+    to_tensor = ld.ToTensor(model='blobsfinder')
+    norm_img = ld.NormalizeImage()
+    compose = transforms.Compose([crop, norm_img, to_tensor])
+    test_loader = ld.ALMADataset('test_params.csv', test_dir, transform=compose)
+    print('Loading all Deep Learning Models')
+    # Loading Blobs Finder latest checkpoint
+    blobsfinder = bf.BlobsFinder(config['hidden_channels'])
+    bf_optimizer = torch.optim.Adam(blobsfinder.parameters(), lr=config['learning_rate'], 
+                                         weight_decay=config['weight_decay'])
+    bf_criterion = [nn.SSIMLoss(), nn.L1Loss()]
+    if torch.cuda.device_count() > 1 and config['multi_gpu']:
+        print(f'Using {torch.cuda.device_count()} GPUs')
+        blobsfinder = nn.DataParallel(blobsfinder)
+    blobsfinder.to(device)
+    outpath = os.sep.join((config['output_dir'], config['blobsfinder_name'] + ".pt"))
+    blobsfinder, _, _ = load_checkpoint(blobsfinder, bf_optimizer, outpath)
+    # Loading Deep GRU and the other ResNets
+    deepGRU = dg.DeepGRU(1, 32, 1, True).to(device)
+    dg_criterion = nn.L1Loss()
+    dg_optimizer = torch.optim.Adam(deepGRU.parameters(), lr=config['learning_rate'], 
+                                         weight_decay=config['weight_decay'])
+    outpath = os.sep.join((config['output_dir'], config['deepGRU_name'] + ".pt"))
+    deepGRU, _, _ = load_checkpoint(deepGRU, dg_optimizer, outpath)
+
+    # Loading ResNets
+    resnet = rn.ResNet18(1, 1).to(device)
+    resnet_optimizer = torch.optim.Adam(resnet.parameters, lr=config['learning_rate'], 
+                                         weight_decay=config['weight_decay'])
+    fwhmx_outpath = os.sep.join((config['output_dir'], config['fwhmx_resnet_name'] + ".pt"))
+    fwhmx_resnet = load_checkpoint(resnet, resnet_optimizer, fwhmx_outpath)
+    fwhmy_outpath = os.sep.join((config['output_dir'], config['fwhmy_resnet_name'] + ".pt"))
+    fwhmy_resnet = load_checkpoint(resnet, resnet_optimizer, fwhmy_outpath)
+    pa_outpath = os.sep.join((config['output_dir'], config['pa_resnet_name'] + ".pt"))
+    pa_resnet = load_checkpoint(resnet, resnet_optimizer, pa_outpath)
+    flux_outpath = os.sep.join((config['output_dir'], config['flux_resnet_name'] + ".pt"))
+    flux_resnet = load_checkpoint(resnet, resnet_optimizer, flux_outpath)
+    resnet_criterion = nn.L1Loss()
+    # setting all models in eval mode
+    blobsfinder.eval()
+    deepGRU.eval()
+    fwhmx_resnet.eval()
+    fwhmy_resnet.eval()
+    pa_resnet.eval()
+    flux_resnet.eval()
+    cube_id = 0
+    for i_batch, batch in tqdm(enumerate(test_loader)):
+        inputs = batch[0].to(device)
+        targets = batch[1]
+        params = batch[4]
+        dirty_cubes = batch[5]
+        clean_cubes = batch[6]
+        loss, outputs = test_batch(inputs, targets, blobsfinder, bf_criterion)
+        spectra = []
+        dspectra = []
+        parameters = []
+        focussed = []
+        ids = []
+        for b in tqdm(range(len(outputs))):
+            output = outputs[b, 0].cpu().detach().numpy()
+            param = params[b]
+            dirty_cube = dirty_cubes[b, 0]
+            clean_cube = clean_cubes[b, 0]
+            min_, max_ = np.min(output), np.max(output)
+            output = (output - min_) / (max_ - min_)
+            seg = output.copy()
+            seg[seg > 0.15] = 1
+            seg = seg.astype(int)
+            struct = generate_binary_structure(2, 2)
+            seg = binary_dilation(seg, struct)
+            props = regionprops(label(seg, connectivity=2))
+            boxes = []
+            for prop in props:
+                y0, x0, y1, x1 = prop.bbox
+                boxes.append([y0, x0, y1, x1])
+            boxes = np.array(boxes)
+            dirty_spectra = np.array([
+                np.sum(dirty_cube[:, boxes[j][0]: boxes[j][2], boxes[j][1]: boxes[j][3]], axis=(1, 2))
+                for j in range(len(boxes))
+                ])
+            clean_spectra = np.array([
+                np.sum(clean_cube[:, boxes[j][0]: boxes[j][2], boxes[j][1]: boxes[j][3]], axis=(1, 2))
+                for j in range(len(boxes))
+                ])
+            for j in range(len(dirty_spectra)):
+                parameters.append(param[j])
+                dspec = dirty_spectra[j]
+                dspec = (dspec - np.mean(dspec)) / np.std(dspec)
+                spec = clean_spectra[j]
+                spec = (spec - np.mean(spec)) / np.std(spec)
+                spectra.append(spec)
+                dspectra.append(dspec)
+        ids = np.array(ids)
+        spectra = np.array(spectra)
+        
+        dspectra = np.array(dspectra)
+        dspectra = torch.Tensor(np.transpose(dspectra[np.newaxis], 
+                                        axes=(1, 2, 0)))
+        spectra = torch.Tensor(np.transpose(spectra[np.newaxis], 
+                                        axes=(1, 2, 0)))
+        parameters = np.array(parameters)
+        dspectra = torch.Tensor(np.transpose(dspectra[np.newaxis], 
+                                        axes=(1, 2, 0)))
+        spectra = torch.Tensor(np.transpose(spectra[np.newaxis], 
+                                        axes=(1, 2, 0)))
+        loss, outputs = test_batch(dspectra, spectra, deepGRU, dg_criterion)
+        for b in tqdm(range(len(outputs))):
+            y_0, x_0, y_1, x_1  = boxes[b]
+            width_x, width_y = x_1 - x_0, y_1 - y_0
+            x, y = x_0 + 0.5 * width_x, y_0 + 0.5 * width_y
+            spectrum = outputs[b, :, 0].cpu().detach().numpy()
+            dirty_cube = dirty_cubes[b, 0]
+            min_, max_ = np.min(spectrum), np.max(spectrum)
+            y = (spectrum - min_) / (max_ - min_)
+            x = np.array(range(len(y)))
+            peaks, _ = find_peaks(y, height=np.mean(y) + 0.1, prominence=0.05, distance=10)
+            x_peaks = x[peaks]
+            peaks_amp = y[peaks]
+            # peaks are sorted by amplitude
+            idxs = np.argsort(-peaks_amp)
+            peaks_amp = peaks_amp[idxs]
+            x_peaks = x_peaks[idxs]
+            lims, idxs = [], []
+            #fitting target and output peaks
+            fit_g = fitting.LevMarLSQFitter()
+            for i_peak, peak in enumerate(x_peaks):
+                g1 = models.Gaussian1D(amplitude=peaks_amp[i_peak], mean=peak, stddev=3)
+                if peak > 10 and peak < 118:
+                    g = fit_g(g1, x[peak - 10: peak + 10], y[peak - 10: peak + 10])
+                elif peak <= 10:
+                    g = fit_g(g1, x[:peak + 10], y[:peak + 10])
+                else:
+                    g = fit_g(g1, x[peak - 10:], y[peak - 10:])
+                m, dm = int(g.mean.value), int(g.fwhm)
+                if dm < 64:
+                    lims.append([int(x_peaks[i_peak]) - dm, int(x_peaks[i_peak]) + dm])
+                    idxs.append(i_peak)
+             # Source Focusing and SNR reasoning
+
+            # the first and brightest source is focused and checks are made to retain or discard
+            source = np.sum(dirty_cube[lims[0][0]: lims[0][1], int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+            reference = np.sum(dirty_cube[:, int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+            xsize, ysize = int(source.shape[0]), int(source.shape[1])
+            dx, dy = xsize - 64, ysize - 64
+            if dx % 2 == 0:
+                left, right = dx // 2, xsize - dx // 2
+            else:
+                left, right = dx // 2, xsize - dx // 2 - 1
+            if dy % 2 == 0:
+                bottom, top = dy // 2, ysize - dy // 2
+            else:
+                bottom, top = dy // 2, ysize - dy // 2 - 1
+            source = source[left:right, bottom:top]
+            reference = reference[left:right, bottom:top]
+            gsourceSNR = globalSNR(source, boxes[b])
+            greferenceSNR = globalSNR(reference, boxes[b])
+            lprimarySNR = localSNR(source)
+            #detect highest SNR pixel in the image
+            rpix = np.argmax(lprimarySNR)
+            if gsourceSNR >= 6:
+                min_, max_ = np.min(source), np.max(source)
+                source = (source - min_) / (max_ - min_)
+                focussed.append(source[np.newaxis])
+            else:
+                if gsourceSNR >= greferenceSNR:
+                    min_, max_ = np.min(source), np.max(source)
+                    source = (source - min_) / (max_ - min_)
+                    focussed.append(source[np.newaxis])
+            # if there are secondary peaks, then
+            if len(lims) > 1:
+                for i_peak in range(len(lims))[1:]:
+                    source = np.sum(dirty_cube[lims[i_peak][0]: lims[i_peak][1], int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+                    reference = np.sum(dirty_cube[:, int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+                    xsize, ysize = int(source.shape[0]), int(source.shape[1])
+                    dx, dy = xsize - 64, ysize - 64
+                    if dx % 2 == 0:
+                        left, right = dx // 2, xsize - dx // 2
+                    else:
+                        left, right = dx // 2, xsize - dx // 2 - 1
+                    if dy % 2 == 0:
+                        bottom, top = dy // 2, ysize - dy // 2
+                    else:
+                        bottom, top = dy // 2, ysize - dy // 2 - 1
+                    source = source[left:right, bottom:top]
+                    reference = reference[left:right, bottom:top]
+                    gsourceSNR = globalSNR(source, boxes[b])
+                    greferenceSNR = globalSNR(reference, boxes[b])
+                    lSNR = localSNR(source)
+                    pix = np.argmax(lSNR)
+                    if pix != rpix and gsourceSNR >= greferenceSNR:
+                        min_, max_ = np.min(source), np.max(source)
+                        source = (source - min_) / (max_ - min_)
+                        focussed.append(source[np.newaxis])
+        focussed = torch.Tensor(np.array(focussed))
+        parameters = torch.Tensor(parameters)
+        loss, fwhmxs = test_batch(focussed, parameters, fwhmx_resnet, resnet_criterion)
+        loss, fwhmys = test_batch(focussed, parameters, fwhmy_resnet, resnet_criterion)
+        loss, pas = test_batch(focussed, parameters, pa_resnet, resnet_criterion)
+        loss, fluxes = test_batch(focussed, parameters, flux_resnet, resnet_criterion)
+        xs = boxes[:, 1] + 0.5 * (boxes[:, 3] - boxes[:, 1])
+        ys = boxes[:, 0] + 0.5 * (boxes[:, 2] - boxes[:, 0])
+        ids = np.ones(len(xs)) * cube_id
+        cube_id += 1
+        pparams = np.column_stack((ids, xs, ys, fwhmxs, fwhmys, pas, fluxes))
+        predictions.append(pparams)
+        
+    predictions = np.array(predictions)
+    columns = ['id', 'x', 'y', 'fwhm_x', 'fwhm_y', 'pa', 'flux']
+    db = pd.DataFrame(predictions, columns=columns)
+    return db
+
+
