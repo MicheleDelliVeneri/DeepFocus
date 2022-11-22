@@ -2,13 +2,18 @@ import utils.model_utils as mut
 import torch 
 import pandas as pd
 import os 
+import wandb
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
+
+# DO NOT RUN THIS FILE!!!! BUT YOU CAN COPY AND PASTE THE CODE TO YOUR MAIN FILE
+# First of all setup weight and biases
+wandb.login()
 # Examples of single models training 
 # ----------------------------------------------------------------
 
 # Training Blobs Finder 
-config = dict(
+hyperparams = dict(
     epochs = 200,
     batch_size = 64, 
     muli_gpu = False, 
@@ -27,11 +32,16 @@ config = dict(
     output_dir = '/lustre/home/mdelliveneri/ALMADL/trained_models',
     prediction_dir = '/lustre/home/mdelliveneri/ALMADL/predictions',
     plot_dir = '/lustre/home/mdelliveneri/ALMADL/plots',
-    model_name = 'blobsfinder'
+    model_name = 'blobsfinder',
+    experiment_name = 'blobsfinder_test_01',
+    entity = 'mdelliveneri',
 )
+with wandb.init(project=hyperparams['project'], name=hyperparams['experiment_name'], entity=hyperparams['entity'], config=hyperparams):
+    config = wandb.config
+    blobsfinder, criterion, optimizer, train_loader, valid_loader = mut.make_blobsfinder(config, device)
+    mut.train(blobsfinder, criterion, optimizer, train_loader, valid_loader)
 
-blobsfinder, criterion, optimizer, train_loader, valid_loader = mut.make_blobsfinder(config, device)
-mut.train(blobsfinder, criterion, optimizer, train_loader, valid_loader)
+
 
 # Training Deep GRU
 config = dict(
@@ -50,10 +60,14 @@ config = dict(
     output_dir = '/lustre/home/mdelliveneri/ALMADL/trained_models',
     prediction_dir = '/lustre/home/mdelliveneri/ALMADL/predictions',
     plot_dir = '/lustre/home/mdelliveneri/ALMADL/plots',
-    model_name = 'deepgru'
+    model_name = 'deepgru',
+    experiment_name = 'deepgru_test_01',
+    entity = 'mdelliveneri',
 )
-deepgru, criterion, optimizer, train_loader, valid_loader = mut.make_blobsfinder(config, device)
-mut.train(deepgru, criterion, optimizer, train_loader, valid_loader)
+with wandb.init(project=hyperparams['project'], name=hyperparams['experiment_name'], entity=hyperparams['entity'], config=hyperparams):
+    config = wandb.config
+    deepgru, criterion, optimizer, train_loader, valid_loader = mut.make_deepgru(config, device)
+    mut.train(deepgru, criterion, optimizer, train_loader, valid_loader)
 
 # Training the ResNets
 # FWHM X
@@ -75,10 +89,14 @@ config = dict(
     prediction_dir = '/lustre/home/mdelliveneri/ALMADL/predictions',
     plot_dir = '/lustre/home/mdelliveneri/ALMADL/plots',
     model_name = 'fwhmx_resnet',
-    param = 'fwhm_x'
+    param = 'fwhm_x',
+    experiment_name = 'fwhm_x_renet_test_01',
+    entity = 'mdelliveneri',
 )
-fwhmx_resnet, criterion, optimizer, train_loader, valid_loader = mut.make_resnet(config, device)
-mut.train(fwhmx_resnet, criterion, optimizer, train_loader, valid_loader)
+with wandb.init(project=hyperparams['project'], name=hyperparams['experiment_name'], entity=hyperparams['entity'], config=hyperparams):
+    config = wandb.config
+    fwhmx_resnet, criterion, optimizer, train_loader, valid_loader = mut.make_resnet(config, device)
+    mut.train(fwhmx_resnet, criterion, optimizer, train_loader, valid_loader)
 
 # FWHM Y
 config = dict(
@@ -99,10 +117,14 @@ config = dict(
     prediction_dir = '/lustre/home/mdelliveneri/ALMADL/predictions',
     plot_dir = '/lustre/home/mdelliveneri/ALMADL/plots',
     model_name = 'fwhmy_resnet',
-    param = 'fwhm_y'
+    param = 'fwhm_y',
+    experiment_name = 'fwhm_y_renet_test_01',
+    entity = 'mdelliveneri',
 )
-fwhmy_resnet, criterion, optimizer, train_loader, valid_loader = mut.make_resnet(config, device)
-mut.train(fwhmy_resnet, criterion, optimizer, train_loader, valid_loader)
+with wandb.init(project=hyperparams['project'], name=hyperparams['experiment_name'], entity=hyperparams['entity'], config=hyperparams):
+    config = wandb.config
+    fwhmy_resnet, criterion, optimizer, train_loader, valid_loader = mut.make_resnet(config, device)
+    mut.train(fwhmy_resnet, criterion, optimizer, train_loader, valid_loader)
 
 # PA
 config = dict(
@@ -123,7 +145,9 @@ config = dict(
     prediction_dir = '/lustre/home/mdelliveneri/ALMADL/predictions',
     plot_dir = '/lustre/home/mdelliveneri/ALMADL/plots',
     model_name = 'pa_resnet',
-    param = 'pa'
+    param = 'pa',
+    experiment_name = 'pa_renet_test_01',
+    entity = 'mdelliveneri',
 )
 pa_resnet, criterion, optimizer, train_loader, valid_loader = mut.make_resnet(config, device)
 mut.train(pa_resnet, criterion, optimizer, train_loader, valid_loader)
@@ -147,10 +171,15 @@ config = dict(
     prediction_dir = '/lustre/home/mdelliveneri/ALMADL/predictions',
     plot_dir = '/lustre/home/mdelliveneri/ALMADL/plots',
     model_name = 'flux_resnet',
-    param = 'flux'
+    param = 'flux',
+    experiment_name = 'flux_renet_test_01',
+    entity = 'mdelliveneri',
+    
 )
-fwhmx_resnet, criterion, optimizer, train_loader, valid_loader = mut.make_resnet(config, device)
-mut.train(fwhmx_resnet, criterion, optimizer, train_loader, valid_loader)
+with wandb.init(project=hyperparams['project'], name=hyperparams['experiment_name'], entity=hyperparams['entity'], config=hyperparams):
+    config = wandb.config
+    fwhmx_resnet, criterion, optimizer, train_loader, valid_loader = mut.make_resnet(config, device)
+    mut.train(fwhmx_resnet, criterion, optimizer, train_loader, valid_loader)
 
 # Train each model on the predictions of the previous one
 # ------------------------------------------------------------------------------------------------
@@ -178,7 +207,9 @@ config = dict(
     flux_resnet_name = 'flux_resnet'
 )
 mut.train_on_predictions(config, device)
-# Now that the model are trained, produce predictions on the test set 
+
+
+# Set the pipeline in inference mode and run predictions
 #----------------------------------------------------------------
 predictions = mut.run_pipeline(config, device)
 pd.to_csv(os.path.join(config['prediction_dir'], 'predictions.csv'))
