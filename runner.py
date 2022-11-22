@@ -4,7 +4,7 @@ import pandas as pd
 import os 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# First each model is trained indipendently
+# Examples of single models training 
 # ----------------------------------------------------------------
 
 # Training Blobs Finder 
@@ -19,8 +19,9 @@ config = dict(
     patience = 20,
     hidden_channels = 1024,
     criterion=['l_1', 'ssim'],
-    warm_start=False,
-    warm_start_iterations = 3,
+    warm_start=True,
+    warm_start_iterations = 10,
+    detection_threshold = 0.15,
     data_folder='/lustre/home/mdelliveneri/ALMADL/data/',
     project = 'ALMA',
     output_dir = '/lustre/home/mdelliveneri/ALMADL/trained_models',
@@ -91,7 +92,7 @@ config = dict(
     patience = 20,
     hidden_channels = 1024,
     warm_start=False,
-    warm_start_iterations = 3,
+    warm_start_iterations = 10,
     data_folder='/lustre/home/mdelliveneri/ALMADL/data/',
     project = 'ALMA',
     output_dir = '/lustre/home/mdelliveneri/ALMADL/trained_models',
@@ -115,7 +116,7 @@ config = dict(
     patience = 20,
     hidden_channels = 1024,
     warm_start=False,
-    warm_start_iterations = 3,
+    warm_start_iterations = 10,
     data_folder='/lustre/home/mdelliveneri/ALMADL/data/',
     project = 'ALMA',
     output_dir = '/lustre/home/mdelliveneri/ALMADL/trained_models',
@@ -139,7 +140,7 @@ config = dict(
     patience = 20,
     hidden_channels = 1024,
     warm_start=False,
-    warm_start_iterations = 3,
+    warm_start_iterations = 10,
     data_folder='/lustre/home/mdelliveneri/ALMADL/data/',
     project = 'ALMA',
     output_dir = '/lustre/home/mdelliveneri/ALMADL/trained_models',
@@ -151,7 +152,7 @@ config = dict(
 fwhmx_resnet, criterion, optimizer, train_loader, valid_loader = mut.make_resnet(config, device)
 mut.train(fwhmx_resnet, criterion, optimizer, train_loader, valid_loader)
 
-# Now each model is trained on the predictions of the previous model
+# Train each model on the predictions of the previous one
 # ------------------------------------------------------------------------------------------------
 config = dict(
     epochs = 50,
@@ -163,7 +164,7 @@ config = dict(
     early_stopping = 'True',
     patience = 20,
     warm_start=False,
-    warm_start_iterations = 3,
+    warm_start_iterations = 10,
     data_folder='/lustre/home/mdelliveneri/ALMADL/data/',
     project = 'ALMA',
     output_dir = '/lustre/home/mdelliveneri/ALMADL/trained_models',
@@ -177,7 +178,7 @@ config = dict(
     flux_resnet_name = 'flux_resnet'
 )
 mut.train_on_predictions(config, device)
-# Now that the model are trained, it produces predictions on the test set 
+# Now that the model are trained, produce predictions on the test set 
 #----------------------------------------------------------------
 predictions = mut.run_pipeline(config, device)
 pd.to_csv(os.path.join(config['prediction_dir'], 'predictions.csv'))

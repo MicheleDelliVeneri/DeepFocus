@@ -321,14 +321,14 @@ def train_batch(inputs, targets, model, optimizer, criterion):
     outputs: the output tensor;
 
     """
+    optimizer.zero_grad()
     outputs = model(inputs)
     if isinstance(criterion, list):
         loss = 0
         for i in range(len(criterion)):
             loss += criterion[i](outputs, targets)
     else:
-        loss = criterion(outputs, targets)
-    optimizer.zero_grad()
+        loss = criterion(outputs, targets)  
     loss.backward()
     optimizer.step()
     return loss, outputs
@@ -349,6 +349,7 @@ def valid_batch(inputs, targets, model, optimizer, criterion):
     outputs: the output tensor;
 
     """
+    optimizer.zero_grad()
     outputs = model(inputs)
     if isinstance(criterion, list):
         loss = 0
@@ -356,7 +357,7 @@ def valid_batch(inputs, targets, model, optimizer, criterion):
             loss += criterion[i](outputs, targets)
     else:
         loss = criterion(outputs, targets)
-    optimizer.zero_grad()
+    
     return loss, outputs
 
 def test_batch(inputs, targets, model, criterion):
@@ -518,8 +519,10 @@ def train(model, train_loader, valid_loader, criterion,
         early_stopping = EarlyStopping(patience=config['patience'], verbose=False)
     outpath = os.sep.join((config['output_dir'], name + ".pt"))
     for epoch in tqdm(range(config.epochs)):
+        iteration_counter = 0
         model.train()
         running_loss = 0.0
+        nb = len(train_loader)
         for i_batch, batch in tqdm(enumerate(train_loader)):
             inputs = batch[0].to(device)
             targets = batch[1]
@@ -529,6 +532,11 @@ def train(model, train_loader, valid_loader, criterion,
             if config['model'] == 'spectral':
                 inputs = normalize_spectra(inputs)
                 targets = normalize_spectra(targets)
+            iteration_number = iteration_counter + epoch * nb
+            if config['warm_start'] and iteration_number < config['warm_start_iterations']:
+                xi = [0, config['warm_start_iterations']]
+                for j, x in enumerate(optimizer.param_groups):
+                    x['lr'] = np.interp(iteration_number, xi, [config['warm_start_lr'], config['lr']])
             loss, outputs = train_batch(inputs, targets, model, optimizer, criterion)
             example_ct += len(inputs)
             train_log(loss, optimizer, epoch)
@@ -620,7 +628,7 @@ def test(model, test_loader, criterion, config, device):
                 min_, max_ = np.min(output), np.max(output)
                 output = (output - min_) / (max_ - min_)
                 seg = output.copy()
-                seg[seg > 0.15] = 1
+                seg[seg >= config['detection_threshold']] = 1
                 seg = seg.astype(int)
                 struct = generate_binary_structure(2, 2)
                 seg = binary_dilation(seg, struct)
@@ -828,7 +836,7 @@ def get_spectra_from_dataloader(config, blobsfinder, bf_criterion, loader, devic
             min_, max_ = np.min(output), np.max(output)
             output = (output - min_) / (max_ - min_)
             seg = output.copy()
-            seg[seg > 0.15] = 1
+            seg[seg >= config['detection_threshold']] = 1
             seg = seg.astype(int)
             struct = generate_binary_structure(2, 2)
             seg = binary_dilation(seg, struct)
@@ -911,7 +919,7 @@ def get_focussed_from_dataloader(config, blobsfinder, deepGRU, bf_criterion, dg_
             min_, max_ = np.min(output), np.max(output)
             output = (output - min_) / (max_ - min_)
             seg = output.copy()
-            seg[seg > 0.15] = 1
+            seg[seg >= config['detection_threshold']] = 1
             seg = seg.astype(int)
             struct = generate_binary_structure(2, 2)
             seg = binary_dilation(seg, struct)
@@ -1180,27 +1188,36 @@ def run_pipeline(config, device):
     pa_resnet.eval()
     flux_resnet.eval()
     cube_id = 0
+
+    tp, fp, fn = 0
+    
+    pIoUs, tIoUs, pfluxes, tfluxes, pSNRs, tSNRs = [], [], [], [], [], []
+    tparameters, pparameters = [], []
+
+
     for i_batch, batch in tqdm(enumerate(test_loader)):
         inputs = batch[0].to(device)
         targets = batch[1]
         params = batch[4]
+        target_boxes = batch[2]
         dirty_cubes = batch[5]
         clean_cubes = batch[6]
-        loss, outputs = test_batch(inputs, targets, blobsfinder, bf_criterion)
+        loss, bf_outputs = test_batch(inputs, targets, blobsfinder, bf_criterion)
         spectra = []
         dspectra = []
         parameters = []
         focussed = []
         ids = []
-        for b in tqdm(range(len(outputs))):
-            output = outputs[b, 0].cpu().detach().numpy()
+        for b in tqdm(range(len(bf_outputs))):
+            output = bf_outputs[b, 0].cpu().detach().numpy()
             param = params[b]
+            tboxes = target_boxes[b]
             dirty_cube = dirty_cubes[b, 0]
             clean_cube = clean_cubes[b, 0]
             min_, max_ = np.min(output), np.max(output)
             output = (output - min_) / (max_ - min_)
             seg = output.copy()
-            seg[seg > 0.15] = 1
+            seg[seg >= config['detection_threshold']] = 1
             seg = seg.astype(int)
             struct = generate_binary_structure(2, 2)
             seg = binary_dilation(seg, struct)
@@ -1226,123 +1243,249 @@ def run_pipeline(config, device):
                 spec = (spec - np.mean(spec)) / np.std(spec)
                 spectra.append(spec)
                 dspectra.append(dspec)
-        ids = np.array(ids)
-        spectra = np.array(spectra)
-        
-        dspectra = np.array(dspectra)
-        dspectra = torch.Tensor(np.transpose(dspectra[np.newaxis], 
+            
+            ids = np.array(ids)
+            spectra = np.array(spectra)
+            dspectra = np.array(dspectra)
+            dspectra = torch.Tensor(np.transpose(dspectra[np.newaxis], 
                                         axes=(1, 2, 0)))
-        spectra = torch.Tensor(np.transpose(spectra[np.newaxis], 
+            spectra = torch.Tensor(np.transpose(spectra[np.newaxis], 
                                         axes=(1, 2, 0)))
-        parameters = np.array(parameters)
-        dspectra = torch.Tensor(np.transpose(dspectra[np.newaxis], 
+            parameters = np.array(parameters)
+            dspectra = torch.Tensor(np.transpose(dspectra[np.newaxis], 
                                         axes=(1, 2, 0)))
-        spectra = torch.Tensor(np.transpose(spectra[np.newaxis], 
+            spectra = torch.Tensor(np.transpose(spectra[np.newaxis], 
                                         axes=(1, 2, 0)))
-        loss, outputs = test_batch(dspectra, spectra, deepGRU, dg_criterion)
-        for b in tqdm(range(len(outputs))):
-            y_0, x_0, y_1, x_1  = boxes[b]
-            width_x, width_y = x_1 - x_0, y_1 - y_0
-            x, y = x_0 + 0.5 * width_x, y_0 + 0.5 * width_y
-            spectrum = outputs[b, :, 0].cpu().detach().numpy()
-            dirty_cube = dirty_cubes[b, 0]
-            min_, max_ = np.min(spectrum), np.max(spectrum)
-            y = (spectrum - min_) / (max_ - min_)
-            x = np.array(range(len(y)))
-            peaks, _ = find_peaks(y, height=np.mean(y) + 0.1, prominence=0.05, distance=10)
-            x_peaks = x[peaks]
-            peaks_amp = y[peaks]
-            # peaks are sorted by amplitude
-            idxs = np.argsort(-peaks_amp)
-            peaks_amp = peaks_amp[idxs]
-            x_peaks = x_peaks[idxs]
-            lims, idxs = [], []
-            #fitting target and output peaks
-            fit_g = fitting.LevMarLSQFitter()
-            for i_peak, peak in enumerate(x_peaks):
-                g1 = models.Gaussian1D(amplitude=peaks_amp[i_peak], mean=peak, stddev=3)
-                if peak > 10 and peak < 118:
-                    g = fit_g(g1, x[peak - 10: peak + 10], y[peak - 10: peak + 10])
-                elif peak <= 10:
-                    g = fit_g(g1, x[:peak + 10], y[:peak + 10])
+            dspectra = normalize_spectra(dspectra)
+            spectra = normalize_spectra(spectra)
+            loss, dg_outputs = test_batch(dspectra, spectra, deepGRU, dg_criterion)
+            sboxes, slims, sx_peaks = [], [], []
+            for bg in tqdm(range(len(dg_outputs))):
+                y_0, x_0, y_1, x_1  = boxes[bg]
+                width_x, width_y = x_1 - x_0, y_1 - y_0
+                x, y = x_0 + 0.5 * width_x, y_0 + 0.5 * width_y
+                spectrum = dg_outputs[bg, :, 0].cpu().detach().numpy()
+                dirty_cube = dirty_cubes[b, 0]
+                min_, max_ = np.min(spectrum), np.max(spectrum)
+                y = (spectrum - min_) / (max_ - min_)
+                x = np.array(range(len(y)))
+                peaks, _ = find_peaks(y, height=np.mean(y) + 0.1, prominence=0.05, distance=10)
+                x_peaks = x[peaks]
+                peaks_amp = y[peaks]
+                # peaks are sorted by amplitude
+                idxs = np.argsort(-peaks_amp)
+                peaks_amp = peaks_amp[idxs]
+                x_peaks = x_peaks[idxs]
+                lims, idxs = [], []
+                #fitting target and output peaks
+                fit_g = fitting.LevMarLSQFitter()
+                for i_peak, peak in enumerate(x_peaks):
+                    g1 = models.Gaussian1D(amplitude=peaks_amp[i_peak], mean=peak, stddev=3)
+                    if peak > 10 and peak < 118:
+                        g = fit_g(g1, x[peak - 10: peak + 10], y[peak - 10: peak + 10])
+                    elif peak <= 10:
+                        g = fit_g(g1, x[:peak + 10], y[:peak + 10])
+                    else:
+                        g = fit_g(g1, x[peak - 10:], y[peak - 10:])
+                    m, dm = int(g.mean.value), int(g.fwhm)
+                    if dm < 64:
+                        lims.append([int(x_peaks[i_peak]) - dm, int(x_peaks[i_peak]) + dm])
+                        idxs.append(i_peak)
+                # Source Focusing and SNR reasoning
+                # the first and brightest source is focused and checks are made to retain or discard
+                source = np.sum(dirty_cube[lims[0][0]: lims[0][1], int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+                reference = np.sum(dirty_cube[:, int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+                xsize, ysize = int(source.shape[0]), int(source.shape[1])
+                dx, dy = xsize - 64, ysize - 64
+                if dx % 2 == 0:
+                    left, right = dx // 2, xsize - dx // 2
                 else:
-                    g = fit_g(g1, x[peak - 10:], y[peak - 10:])
-                m, dm = int(g.mean.value), int(g.fwhm)
-                if dm < 64:
-                    lims.append([int(x_peaks[i_peak]) - dm, int(x_peaks[i_peak]) + dm])
-                    idxs.append(i_peak)
-             # Source Focusing and SNR reasoning
-
-            # the first and brightest source is focused and checks are made to retain or discard
-            source = np.sum(dirty_cube[lims[0][0]: lims[0][1], int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
-            reference = np.sum(dirty_cube[:, int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
-            xsize, ysize = int(source.shape[0]), int(source.shape[1])
-            dx, dy = xsize - 64, ysize - 64
-            if dx % 2 == 0:
-                left, right = dx // 2, xsize - dx // 2
-            else:
-                left, right = dx // 2, xsize - dx // 2 - 1
-            if dy % 2 == 0:
-                bottom, top = dy // 2, ysize - dy // 2
-            else:
-                bottom, top = dy // 2, ysize - dy // 2 - 1
-            source = source[left:right, bottom:top]
-            reference = reference[left:right, bottom:top]
-            gsourceSNR = globalSNR(source, boxes[b])
-            greferenceSNR = globalSNR(reference, boxes[b])
-            lprimarySNR = localSNR(source)
-            #detect highest SNR pixel in the image
-            rpix = np.argmax(lprimarySNR)
-            if gsourceSNR >= 6:
-                min_, max_ = np.min(source), np.max(source)
-                source = (source - min_) / (max_ - min_)
-                focussed.append(source[np.newaxis])
-            else:
-                if gsourceSNR >= greferenceSNR:
+                    left, right = dx // 2, xsize - dx // 2 - 1
+                if dy % 2 == 0:
+                    bottom, top = dy // 2, ysize - dy // 2
+                else:
+                    bottom, top = dy // 2, ysize - dy // 2 - 1
+                source = source[left:right, bottom:top]
+                reference = reference[left:right, bottom:top]
+                gsourceSNR = globalSNR(source, boxes[b])
+                greferenceSNR = globalSNR(reference, boxes[b])
+                lprimarySNR = localSNR(source)
+                #detect highest SNR pixel in the image
+                rpix = np.argmax(lprimarySNR)
+                if gsourceSNR >= 6:
                     min_, max_ = np.min(source), np.max(source)
                     source = (source - min_) / (max_ - min_)
+                    sboxes.append(extract_box(source, int(x), int(y), config))
                     focussed.append(source[np.newaxis])
-            # if there are secondary peaks, then
-            if len(lims) > 1:
-                for i_peak in range(len(lims))[1:]:
-                    source = np.sum(dirty_cube[lims[i_peak][0]: lims[i_peak][1], int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
-                    reference = np.sum(dirty_cube[:, int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
-                    xsize, ysize = int(source.shape[0]), int(source.shape[1])
-                    dx, dy = xsize - 64, ysize - 64
-                    if dx % 2 == 0:
-                        left, right = dx // 2, xsize - dx // 2
-                    else:
-                        left, right = dx // 2, xsize - dx // 2 - 1
-                    if dy % 2 == 0:
-                        bottom, top = dy // 2, ysize - dy // 2
-                    else:
-                        bottom, top = dy // 2, ysize - dy // 2 - 1
-                    source = source[left:right, bottom:top]
-                    reference = reference[left:right, bottom:top]
-                    gsourceSNR = globalSNR(source, boxes[b])
-                    greferenceSNR = globalSNR(reference, boxes[b])
-                    lSNR = localSNR(source)
-                    pix = np.argmax(lSNR)
-                    if pix != rpix and gsourceSNR >= greferenceSNR:
+                    slims.append(lims[0])
+                    sx_peaks.append(x_peaks[0])
+                else:
+                    if gsourceSNR >= greferenceSNR:
                         min_, max_ = np.min(source), np.max(source)
                         source = (source - min_) / (max_ - min_)
                         focussed.append(source[np.newaxis])
-        focussed = torch.Tensor(np.array(focussed))
-        parameters = torch.Tensor(parameters)
-        loss, fwhmxs = test_batch(focussed, parameters, fwhmx_resnet, resnet_criterion)
-        loss, fwhmys = test_batch(focussed, parameters, fwhmy_resnet, resnet_criterion)
-        loss, pas = test_batch(focussed, parameters, pa_resnet, resnet_criterion)
-        loss, fluxes = test_batch(focussed, parameters, flux_resnet, resnet_criterion)
-        xs = boxes[:, 1] + 0.5 * (boxes[:, 3] - boxes[:, 1])
-        ys = boxes[:, 0] + 0.5 * (boxes[:, 2] - boxes[:, 0])
-        ids = np.ones(len(xs)) * cube_id
-        cube_id += 1
-        pparams = np.column_stack((ids, xs, ys, fwhmxs, fwhmys, pas, fluxes))
+                        sboxes.append(extract_box(source, int(x), int(y), config))
+                        slims.append(lims[0])
+                        sx_peaks.append(x_peaks[0])
+                # if there are secondary peaks, then
+                if len(lims) > 1:
+                    for i_peak in range(len(lims))[1:]:
+                        source = np.sum(dirty_cube[lims[i_peak][0]: lims[i_peak][1], int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+                        reference = np.sum(dirty_cube[:, int(y) - 32: int(y) + 32, int(x) - 32: int(x) + 32], axis=0)
+                        xsize, ysize = int(source.shape[0]), int(source.shape[1])
+                        dx, dy = xsize - 64, ysize - 64
+                        if dx % 2 == 0:
+                            left, right = dx // 2, xsize - dx // 2
+                        else:
+                            left, right = dx // 2, xsize - dx // 2 - 1
+                        if dy % 2 == 0:
+                            bottom, top = dy // 2, ysize - dy // 2
+                        else:
+                            bottom, top = dy // 2, ysize - dy // 2 - 1
+                        source = source[left:right, bottom:top]
+                        reference = reference[left:right, bottom:top]
+                        gsourceSNR = globalSNR(source, boxes[bg])
+                        greferenceSNR = globalSNR(reference, boxes[bg])
+                        lSNR = localSNR(source)
+                        pix = np.argmax(lSNR)
+                        if pix != rpix and gsourceSNR >= greferenceSNR:
+                            min_, max_ = np.min(source), np.max(source)
+                            source = (source - min_) / (max_ - min_)
+                            focussed.append(source[np.newaxis])
+                            sboxes.append(extract_box(source, int(x), int(y), config))
+                            slims.append(lims[i_peak])
+                            sx_peaks.append(x_peaks[i_peak])
+
+
+                # extracting truth parameters for spectral direction
+                tspectrum = spectra[b, 0]
+                min_, max_ = np.min(tspectrum), np.max(tspectrum)
+                ty = (tspectrum - min_) / (max_ - min_)
+                x = np.array(range(len(ty)))
+                tpeaks, _ = find_peaks(ty, height=0.0, prominence=0.05, distance=10)
+                tpeaks_amp = ty[tpeaks]
+                tx_peaks = x[tpeaks]
+                tlims, tidxs = [], []
+                for i_peak, peak in enumerate(tx_peaks):
+                    g1 = models.Gaussian1D(amplitude=tpeaks_amp[i_peak], mean=peak, stddev=3)
+                    if peak > 10 and peak < 118:
+                        g = fit_g(g1, x[peak - 10: peak + 10], ty[peak - 10: peak + 10])
+                    elif peak <= 10:
+                        g = fit_g(g1, x[:peak + 10], ty[:peak + 10])
+                    else:
+                        g = fit_g(g1, x[peak - 10:], ty[peak - 10:])
+                    m, dm = int(g.mean.value), int(g.fwhm)
+                    if dm < 64:
+                        tlims.append([int(tx_peaks[i_peak]) - dm, int(tx_peaks[i_peak]) + dm])
+                        tidxs.append(i_peak)
+            
+            sboxes = np.array(sboxes)
+            sx_peaks = np.array(sx_peaks)
+            slims = np.array(slims)   
+            focussed = torch.Tensor(np.array(focussed))
+            parameters = torch.Tensor(parameters)
+            
+            # creating positions for surving boundin boxes and getting true bounding boxes
+            pxs = sboxes[:, 1] + 0.5 * (sboxes[:, 3] - sboxes[:, 1])
+            pys = sboxes[:, 0] + 0.5 * (sboxes[:, 2] - sboxes[:, 0])
+            txc = tboxes[:, 1] + 0.5 * (tboxes[:, 3] - tboxes[:, 1])
+            tyc = tboxes[:, 0] + 0.5 * (tboxes[:, 2] - tboxes[:, 0])
+            tlims = np.array(tlims)
+            tidxs = np.array(tidxs)
+
+            t_x, t_y, p_x, p_y = [], [], [], []
+            t_z, p_z, t_extension, p_extension, = [], [], [], []
+            stx_peaks = []
+            stlims = []
+            # Checking matching criteria
+            # spatial criterium
+            dists = []
+            for j in range(len(txc)):
+                d = []
+                for k in range(len(pxs)):
+                    d.append(np.sqrt((txc[j] - pxs[k])**2 + (tyc[j] - pys[k])**2))
+                dists.append(d)
+                dists = np.array(dists)
+                idxs = np.argmin(dists, axis=1)
+                dists = np.min(dists, axis=1)
+                ious = box_iou(torch.Tensor(tboxes), torch.Tensor(boxes)).numpy()
+                ious = np.max(ious, axis=1)
+                for i in range(len(dists)):
+                    if ious[i] >= config['twoD_iou_threshold'] and dists[i] <= config['twoD_dist_threshold']:
+                        t_x.append(txc[i])
+                        t_y.append(tyc[i])
+                        p_x.append(pxs[idxs[i]])
+                        p_y.append(pys[idxs[i]])
+                        stx_peaks.append(sx_peaks[idxs[i]])
+                        stlims.append(slims[idxs[i]])
+                    else:
+                         fn += 1
+            stx_peaks = np.array(stx_peaks)
+            stlims = np.array(stlims)
+            # frequency criterium
+            dists = []
+            ious = []
+            for j in range(len(tx_peaks)):
+                dists.append(np.sqrt((tx_peaks[j] - stx_peaks[j]) ** 2))
+                ious.append(oned_iou(tlims[j], stlims[j]))
+            dists = np.array(dists)
+            ious = np.array(ious)
+            sidxs = []
+            for i in range(len(dists)):
+                if dists[i] <= config['oneD_dist_threshold'] and ious[i] >= config['oneD_iou_threshold']:
+                    t_z.append(tx_peaks[i])
+                    p_z.append(x_peaks[i])
+                    t_extension.append(tlims[i][1] - tlims[i][0])
+                    p_extension.append(lims[i][1] - lims[i][0])
+                    tp += 1
+                    sidxs.append(i)
+                else:
+                    fn += 1
+
+            
+            t_x = np.array(t_x)[sidxs]
+            t_y = np.array(t_y)[sidxs]
+            p_x = np.array(p_x)[sidxs]
+            p_y = np.array(p_y)[sidxs]
+            t_z = np.array(t_z)
+            p_z = np.array(p_z)
+            t_extension = np.array(t_extension)
+            s_extension = np.array(s_extension)
+            
+            focussed = focussed[sidxs]
+            parameters = parameters[sidxs]
+            loss, fwhmxs = test_batch(focussed, parameters, fwhmx_resnet, resnet_criterion)
+            loss, fwhmys = test_batch(focussed, parameters, fwhmy_resnet, resnet_criterion)
+            loss, pas = test_batch(focussed, parameters, pa_resnet, resnet_criterion)
+            loss, fluxes = test_batch(focussed, parameters, flux_resnet, resnet_criterion)
+
+            ids = np.ones(len(p_x)) * cube_id
+            cube_id += 1
+            pparams = np.column_stack((ids, p_x, p_y, p_z, fwhmxs, fwhmys, s_extension, pas, fluxes))
         predictions.append(pparams)
         
-    predictions = np.array(predictions)
-    columns = ['id', 'x', 'y', 'fwhm_x', 'fwhm_y', 'pa', 'flux']
+    predictions = np.concatenate(predictions, axis=0)
+
+    columns = ['id', 'x', 'y', 'z', 'fwhm_x', 'fwhm_y', 'dz' 'pa', 'flux']
     db = pd.DataFrame(predictions, columns=columns)
     return db
+
+def extract_box(image, dx, dy, config):
+    seg = image.copy()
+    seg[seg >= config['detection_threshold']] = 1
+    seg = seg.astype(int)
+    struct = generate_binary_structure(2, 2)
+    seg = binary_dilation(seg, struct)
+    props = regionprops(label(seg, connectivity=2))
+    boxes = []
+    for prop in props:
+        y0, x0, y1, x1 = prop.bbox
+        boxes.append([y0, x0, y1, x1])
+    box = np.array(boxes)[0]
+    box[1] = box[1] + dx
+    box[3] = box[3] + dx
+    box[0] = box[0] + dy
+    box[2] = box[2] + dy
+    return box
 
 
