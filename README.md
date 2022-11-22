@@ -10,7 +10,7 @@ TBW
 
 
 
-### Cite
+### Cite us
 Michele Delli Veneri, Łukasz Tychoniec, Fabrizia Guglielmetti, Giuseppe Longo, Eric Villard, 3D Detection and Characterisation of ALMA Sources through Deep Learning, Monthly Notices of the Royal Astronomical Society, 2022;, stac3314, https://doi.org/10.1093/mnras/stac3314
 
 @article{10.1093/mnras/stac3314,
