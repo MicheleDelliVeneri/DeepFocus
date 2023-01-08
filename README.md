@@ -1,7 +1,11 @@
+
 # Deep Focus
 
-ALMA Deep Learning Pipeline for source detection and characterization of sources within ALMA dirty data cubes.
-<img src="/icons/DeepFocus.png" width=50% height=50%>
+-------------------- | -----------------------
+<img src="/icons/DeepFocus.png" width=50% height=50%> | Deep Focus, a metalearner for image deconvolution, source detection and characterization within radio interferometric data cubes.
+
+
+
 ## instructions
 TBW
 
