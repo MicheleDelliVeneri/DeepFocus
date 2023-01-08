@@ -3,7 +3,7 @@
 
 
 Deep Focus, a metalearner for image deconvolution, source detection and characterization within radio interferometric data cubes.
-<img src="/icons/DeepFocus.png" width=25% height=25% style="float: right;margin-right: 7px;margin-top: 7px;">
+<img src="/icons/DeepFocus.png" width=25% height=25% style="float: right;margin-right: 2px;margin-top: 7px;">
 
 
 
