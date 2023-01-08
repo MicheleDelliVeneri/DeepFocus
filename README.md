@@ -1,7 +1,9 @@
 
 # Deep Focus
 
--------------------- | -----------------------
+
+Deep Focus    | badges
+--------------| --------------
 <img src="/icons/DeepFocus.png" width=50% height=50%> | Deep Focus, a metalearner for image deconvolution, source detection and characterization within radio interferometric data cubes.
 
 
