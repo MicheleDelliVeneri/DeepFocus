@@ -1,5 +1,7 @@
 # Deep Focus
+
 ALMA Deep Learning Pipeline for source detection and characterization of sources within ALMA dirty data cubes.
+![DeepFocus Logo](/icons/DeepFocus.png)
 
 ## instructions
 TBW
