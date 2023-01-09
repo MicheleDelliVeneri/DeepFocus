@@ -468,7 +468,6 @@ class ResNetDecoderLayer(nn.Module):
             x = self.oblock(x)
         return x
 
-
 class View(nn.Module):
     def __init__(self, dim,  shape):
         super(View, self).__init__()
@@ -478,7 +477,6 @@ class View(nn.Module):
     def forward(self, input):
         new_shape = list(input.shape)[:self.dim] + list(self.shape) + list(input.shape)[self.dim+1:]
         return input.view(*new_shape)
-
 
 nn.Unflatten = View
 
@@ -588,7 +586,6 @@ class ResNetDecoder(nn.Module):
             print('After Out: ', x.shape)
         return x
 
-
 class ResNetRegressor(nn.Module):
     def __init__(self, in_features, n_hidden, n_classes, activation='relu', classification=False, debug=False, dropout_rate=0.0, *args, **kwargs):
         super().__init__()
@@ -618,8 +615,7 @@ class ResNetRegressor(nn.Module):
         if self.debug:
             print('After FC: ', x.shape)
         return x
-
-        
+    
 class DeepFocus(nn.Module):
     def __init__(self, in_channels=3, out_channels=1, blocks_sizes=[64, 128, 256, 512],
                  oblocks_sizes=[64, 32, 1],
@@ -1081,7 +1077,6 @@ def get_ALMA_test_dataloaders(root_dir, tclean_dir, test_transforms=None,
     ids = np.array(np.array_split(np.array(ids), len(test_dataloader)))
     return test_dataloader, ids
     
-
 def find_params(data_dir, filenames, input_shape, channel_names, preprocess=None,):
     print('Finding normalization parameters...')
     means = []
@@ -1199,7 +1194,6 @@ def param_selector(y, config):
     elif config['parameter'] == 'continuum':
         return torch.from_numpy(y[:, 6][:, np.newaxis])
 
-
 def create_tclean_comparison_images(tclean, inputs, outputs, targets, step, plot_dir, show=False):
     matplotlib.rcParams.update({'font.size': 22})
     fig, ax = plt.subplots(nrows=4, ncols=4, figsize=(32, 32))
@@ -1302,7 +1296,6 @@ def save_images(outputs, ids, config):
         hdul = fits.HDUList([hdu])
         hdul.writeto(path, overwrite=True)
         hdul.close()
-
 
 def log_images(inputs, predictions, targets, step, mode):
     idxs = random.sample(list(np.arange(0, inputs.shape[0])), 2)
@@ -1481,8 +1474,7 @@ def test_epoch(test_loader, model, criterion, config, ids, epoch, device):
         return epoch_loss, tclean_epoch_loss, model_res, tclean_res
     else:
         return epoch_loss, model_res
-        
-            
+                   
 def train_sweep(config=None):
     with wandb.init(config=config):
         # If called by wandb.agent, as below,
