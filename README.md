@@ -142,7 +142,7 @@ the following parameters must be set to use DeepFocus:
 - `get_tclean` (boolean): flag, if set to true, the dataloader will also recover tCLEAN reconstructions of the input cubes (only usefull in the testing phase of a deconvolver to directly compare with tCLEAN)
 - `dataset` (string): each dataset needs a custom dataloader, at this time we have arleady included dataloaders for three datasets:
     - 'ALMA': ALMA dataset as created by the [ALMASim](https://github.com/MicheleDelliVeneri/ALMASim) simulator. 
-    - 'TNG': TNG simulation dataset, channel names and maps are used to select which images to load as input and output
+    - 'TNG': TNG simulation dataset, `channel_names` and `map_name` are used to select which images to load as input and output. If input shape is tridimensional, channels are are interpreted as frequency slices (like a Cube), otherwise as a multi-channel image (like an RGB image).
     - 'SKA': SKA data challenge 2 dataset (only for testing purposes)
 - `data_path`: path to the folder containing the Train, Validation and Test datasets
 - `output_path`: path to the folder where to save the network weights 
@@ -153,7 +153,13 @@ the following parameters must be set to use DeepFocus:
 
 
 ## Sweeps
-One of the main features 
+One of the main features of DeepFocus in the implementation of Weight and Biases [Sweeps](https://wandb.ai/site/sweeps) to test both 
+model hyperparameters and architectures. In order to start a sweep, the following adjoint parameters must be set:
+
+- `method` (string): the method to use for the sweep. For now, only random search, grid-search and bayes are implemented. Random Search will perform N trials of parameters, Grid-search will perform an exauhistive search of all the parameter space, and Bayes will perform N trials and decide which parameters to test or how to proced by using Bayesian statistics.
+- `metric` (string): the metric to use for the sweep. This can be left to the default value if no change has been made to the logging functions, otherwise set as  the name whetever variable you want to use to measure the Networks performance.
+- `metric_goal` (string): the goal of the metric. Chose between "maximize" and "minimize" are implemented.
+- `count` (integer): the number of hyperparameter combinations to test. 
 
 ## Missing Features 
 - SKA Training Dataloader
