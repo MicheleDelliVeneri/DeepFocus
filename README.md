@@ -71,11 +71,11 @@ The architectures are built using the PyTorch library through the following para
             and if you want to build a DenseNet, you should set `block = 'bottleneck'`. Bottleneck layers are used to reduce the number of parameters in the network, by increasing and decreasing it within the block. 
 - `growth_rate`: (scalar) is the growth rate of the DenseNet and ResNets. If you want to build a DenseNet with a growth rate of 12, you should set `growth_rate = 12`, the default value for a ResNet is 4.
 - `skip-connections`: (boolean) if you want to build a ResNet with skip connections, you should set `skip-connections = True`, the default value is `False`. Skip connections are used   to increase the gradient flow in the network, and thus to improve the training.
-- `dropout`: (scalar) is the dropout rate, if you want to build an architecture with a dropout rate of 0.2, you should set `dropout = 0.2`, the default value is 0.0. The Dropout is only used within the last fully connected layers. 
+- `dropout_rate`: (scalar) is the dropout rate, if you want to build an architecture with a dropout rate of 0.2, you should set `dropout = 0.2`, the default value is 0.0. The Dropout is only used within the last fully connected layers and if set to 0 is disabled altogether. 
 - `block_sizes` (list): the number of channels for each layer (which could be composed by multiple blocks) of a given Architecture. For example, if you want to build a Network with 3 layers, the first creating 16 channles, 
 the second 32 and the last 128 you should set  `block_sizes = [32, 64, 128]`.
 - `kernel_sizes` (list): the kernel size for each layer (which could be composed by multiple blocks) of a given Architecture. For example, if you want to build a Network with 3 layers, the first with a kernel size of 5x5x5, 
-                         the second with a kernel size of 3x3x3, and the last with a kernel size of 3x3x1 you should set  `kernel_sizes = [[5, 5, 5], [3, 3, 3], [3, 3, 1]`. Where the first two scalars contain the kernel size 
+                         the second with a kernel size of 3x3x3, and the last with a kernel size of 3x3x1 you should set  `kernel_sizes = [[5, 5, 5], [3, 3, 3], [3, 3, 1]]`. Where the first two scalars contain the kernel size 
                          in the spatial dimension, while the last in frequency.  Offcourse if you input is 2D, only set the spatial dimensions. 
 - `oblock_sizes` (list): the number of channels for each final layer (which could be composed by multiple blocks) of the Decoder part of a U-Net or CAE. 
     These output channels are used only when `dmode="deconvolver"` and their purpose is to make the architecture simmetric and obtain correct output size and number of channels. 
@@ -97,7 +97,7 @@ the second 32 and the last 128 you should set  `block_sizes = [32, 64, 128]`.
 The followind parameters control the network training. 
 - `batch_size` (scalar): the number of samples in each batch.
 - `epochs` (scalar): the number of epochs to train the network.
-- `lr` (scalar): the learning rate of the optimizer.
+- `learning_rate` (scalar): the learning rate of the optimizer.
 - `optimizer` (string): the optimizer to use. For now, only Adam, SGD, and  RMSprop are included.
 - `loss` (string or list of strings): the loss function/s to use. For now, the following loss functions are implemented:
     - Binary Cross Entropy (BCE)
@@ -106,6 +106,7 @@ The followind parameters control the network training.
     - Structural Similarity Index (SSIM)
     - DICE (DICE)
     - Focal Loss (FL)
+- `weight_decay`: (scalar) is the weight decay, default value is set to zero. 
 - `normalize` (boolearn): flag, if set to true input and output are normalized to the [0, 1] range. 
 - `final_activation` (string): activation function to employ in the final layer of the network. 
     For the list of available activation functions, look above.
@@ -143,17 +144,24 @@ the following parameters must be set to use DeepFocus:
     - 'ALMA': ALMA dataset as created by the [ALMASim](https://github.com/MicheleDelliVeneri/ALMASim) simulator. 
     - 'TNG': TNG simulation dataset, channel names and maps are used to select which images to load as input and output
     - 'SKA': SKA data challenge 2 dataset (only for testing purposes)
+- `data_path`: path to the folder containing the Train, Validation and Test datasets
+- `output_path`: path to the folder where to save the network weights 
+- `plot_path`: path to the folder where to save the plots
+- `tclean_path`: path to the folder containing the tCLEAN reconstructions (only usefull in the testing phase of a deconvolver to directly compare with tCLEAN). get_tclean must be set to True. 
+- `prediction_path`: path to the folder where to save the network predictions 
+- `debug`: flag, if set to true, the network is set in debug mode which will print many usefull things such as each layer input and output dimensions
+
+
+## Missing Features 
+- SKA Training Dataloader
+- General Example Dataloader to modify for new data
 
 
 
+### Cite Us
+While the current state of the project is an updated version with respect to what we published, 
+if you use our code, even partially, please do not forget to cite us in your paper
 
-## Missing Features still to be transfered
-- parameter optimization routines
-- output routines and plots
-
-
-
-### Cite us
 Michele Delli Veneri, Łukasz Tychoniec, Fabrizia Guglielmetti, Giuseppe Longo, Eric Villard, 3D Detection and Characterisation of ALMA Sources through Deep Learning, Monthly Notices of the Royal Astronomical Society, 2022;, stac3314, https://doi.org/10.1093/mnras/stac3314
 
 @article{10.1093/mnras/stac3314,
@@ -168,3 +176,7 @@ Michele Delli Veneri, Łukasz Tychoniec, Fabrizia Guglielmetti, Giuseppe Longo, 
     note = {stac3314},
     eprint = {https://academic.oup.com/mnras/advance-article-pdf/doi/10.1093/mnras/stac3314/47014718/stac3314.pdf},
 }
+
+
+
+# Live long and Prosper
