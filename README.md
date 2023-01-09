@@ -152,6 +152,9 @@ the following parameters must be set to use DeepFocus:
 - `debug`: flag, if set to true, the network is set in debug mode which will print many usefull things such as each layer input and output dimensions
 
 
+## Sweeps
+One of the main features 
+
 ## Missing Features 
 - SKA Training Dataloader
 - General Example Dataloader to modify for new data
