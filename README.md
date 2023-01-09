@@ -4,7 +4,8 @@
 Deep Focus, a metalearner for image deconvolution, source detection and characterization within radio interferometric data cubes.
 Currently, Deep Focus is able to deconvolve simulated ALMA data cubes, detect and characterize sources within them or to perform a full deconvolution and source detection and characterization pipeline for SKA data cubes.
 ## Installation
-- DeepFocus requires that you have NVIDIA Drivers installed, download latest from [NVIDIA](https://www.nvidia.com/download/index.  aspx). Also it requires that you have downloaded and installed conda. Get latest conda distribution from [CONDA](https://www.anaconda.com/products/distribution). After you have downloaded it, installed it and update it to the latest version by running the following commands in your terminal
+- DeepFocus requires that you have NVIDIA Drivers installed, download latest from [NVIDIA](https://www.nvidia.com/download/index.aspx). 
+Also it requires that you have downloaded and installed conda. Get latest conda distribution from [CONDA](https://www.anaconda.com/products/distribution). After you have downloaded it, installed it and update it to the latest version by running the following commands in your terminal
 `conda update conda`
 `conda update --all`
 -  Move inside the DeepFocus directory and use the requirements.txt to create a conda environment with all the packages needed to run DeepFocus
@@ -47,6 +48,7 @@ The package is capable of building several Deeep Learning 2D and 3D architecture
 - ResNets (18, 34, 56, 121, .....)
 - DenseNet
 - VGGNet
+
 The following list of parameters affects the type and shape of the architecure build by DeepFocus. 
 The architectures are built using the PyTorch library through the following parameters:
 - `in_channels` (scalar) is the number of input channels, for example if you have a cube with 3 bands, you should set `in_channels = 3`
