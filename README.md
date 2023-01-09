@@ -3,11 +3,15 @@
 <img src="/icons/DeepFocus.png" width=25% height=25% style="float: left;margin-right: 2px;margin-top: 5px;">
 Deep Focus, a metalearner for image deconvolution, source detection and characterization within radio interferometric data cubes.
 Currently, Deep Focus is able to deconvolve simulated ALMA data cubes, detect and characterize sources within them or to perform a full deconvolution and source detection and characterization pipeline for SKA data cubes.
+
 ## Installation
 - DeepFocus requires that you have NVIDIA Drivers installed, download latest from [NVIDIA](https://www.nvidia.com/download/index.aspx). 
-Also it requires that you have downloaded and installed conda. Get latest conda distribution from [CONDA](https://www.anaconda.com/products/distribution). After you have downloaded it, installed it and update it to the latest version by running the following commands in your terminal
+Also it requires that you have downloaded and installed conda. Get latest conda distribution from [CONDA](https://www.anaconda.com/products/distribution). 
+
+After you have downloaded it, installed it and update it to the latest version by running the following commands in your terminal
 `conda update conda`
 `conda update --all`
+
 -  Move inside the DeepFocus directory and use the requirements.txt to create a conda environment with all the packages needed to run DeepFocus
 `conda create --name DeepFocusEnv --file requirements.txt`
 this command will create  a conda environment named DeepFocus with inside already all the needed packages to run DeepFocus.
@@ -18,7 +22,9 @@ Deep Focus can be used to solve 2D and 3D Deconvolution, Segmentation, Regressio
 - dmode = `deconvolver` will build architectures whose output is an image or a cube such as U-Nets and Convolutional Autoencoders. The number of input and output channels are controlled by the `in_channels` and `out_channels` parameters. These can be different, for example `in_channels` could assume a value greater than one if more than one band is fed to an architecture or if different cubes are used as different channels (continuum, hi, moment-masked and so on). 
 - dmode = `regressor` will build architectures for parameter regression such as DenseNets, ResNets and so on. The size of the parametric vector to regress and thus the number of parameters which are predicted is controlled by the output channels parameter. 
 - dmode = `classifier` will build architectures for image or cube classification. The number of classes substitutes the number of output channels. 
+
 DeepFocus assumes that your data is in .fits format. In particular it requires that your data is arleady divided in Train, Validation and Test set with the following directory structure:
+
 - Train
     - Cube1.fits
     - Cube2.fits
@@ -41,13 +47,16 @@ Within the directory, there are three files:
 - train_model.py is a routine to train a model with a given configuration and save its weights on th basis of  the validation loss improvenment over time;
 - test_model.py is a routine to test a model with a given configuration and produce predictions on the Test data and related plots;
 - sweep.py is a routine to perform model and hyperparameter optimization, while tecnically these could be optimized at the same time, we advise to first seach for the best architecture, and then to optimize its hyperparameters (learning rate, batch size, dropout, weight decay and so on).
+
 ### Architectures
+
 The package is capable of building several Deeep Learning 2D and 3D architectures such us:
 - Convolutional Autoencoder (CAE)
 - U-Net
 - ResNets (18, 34, 56, 121, .....)
 - DenseNet
 - VGGNet
+
 
 The following list of parameters affects the type and shape of the architecure build by DeepFocus. 
 The architectures are built using the PyTorch library through the following parameters:
@@ -81,7 +90,9 @@ the second 32 and the last 128 you should set  `block_sizes = [32, 64, 128]`.
 - `decoder_activation` (string): activation function to employ in the decoder part of the network. For the list of available activation functions, look above. 
 - `interpolation` (boolean): if True, upsampling is performed using both bilinear (trilinear for 3D data) interpolations and transposed convolutions. If set to False, only 
     transposed convolutions are used. 
+
 ### Training Parameters
+
 The followind parameters control the network training. 
 - `batch_size` (scalar): the number of samples in each batch.
 - `epochs` (scalar): the number of epochs to train the network.
@@ -114,7 +125,9 @@ The followind parameters control the network training.
     - "log_sqrt" square root of the logarithm
 - `parameter` (string): name of the parameter to regress
 - `num_workers` (integer): number of workers to use for data loading. If it is set to None, it is automatically determined by trying several workers. 
+
 ### Auxiliary Parameters
+
 These parameters are used to control logging, datafolders, plotting and so on. To log, we employ [Weights and Biases](https://wandb.ai/site?utm_source=google&utm_medium=cpc&utm_campaign=Performance-Max&utm_content=site&utm_source=google&utm_medium=cpc&utm_campaign=&utm_term=&utm_content=&gclid=CjwKCAiAk--dBhABEiwAchIwkX6moFZhETPnzuQc_7MZUhYcu2EzUDPEdb6m_vXCRrPKVuMX98FGrhoCuAoQAvD_BwE)
 make sure that you have created an account and that you have performed at least one time the log in from the python interface
 `import wandb`
