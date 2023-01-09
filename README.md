@@ -45,9 +45,9 @@ Where the params .csv files should contain for each source, the ID of the cube, 
 ### General Overview of the package
 The package options such as the data, the model and its hyperparameters are all controlled through dictionaries. In particular, each file starts with a dictionary which should be filled by the user with their parameters of choise. 
 Within the directory, there are three files:
-- train_model.py is a routine to train a model with a given configuration and save its weights on th basis of  the validation loss improvenment over time;
-- test_model.py is a routine to test a model with a given configuration and produce predictions on the Test data and related plots;
-- sweep.py is a routine to perform model and hyperparameter optimization, while tecnically these could be optimized at the same time, we advise to first seach for the best architecture, and then to optimize its hyperparameters (learning rate, batch size, dropout, weight decay and so on).
+- train_model.py is a routine to train a model with a given configuration and save its weights on th basis of  the validation loss improvenment over time
+- test_model.py is a routine to test a model with a given configuration and produce predictions on the Test data and related plots
+- sweep_.py is a routine to perform model and hyperparameter optimization, while tecnically these could be optimized at the same time, we advise to first seach for the best architecture, and then to optimize its hyperparameters (learning rate, batch size, dropout, weight decay and so on).
 
 ### Architectures
 
