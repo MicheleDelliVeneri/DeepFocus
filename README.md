@@ -12,9 +12,10 @@ After you have downloaded it, installed it and update it to the latest version b
 `conda update conda`
 `conda update --all`
 
--  Move inside the DeepFocus directory and use the requirements.txt to create a conda environment with all the packages needed to run DeepFocus
+-  Move inside the DeepFocus directory and use the `requirements.txt` to create a conda environment with all the packages needed to run DeepFocus
+
 `conda create --name DeepFocusEnv --file requirements.txt`
-this command will create  a conda environment named DeepFocus with inside already all the needed packages to run DeepFocus.
+
 Activate the environment `conda activate DeepFocusEnv` and you are ready to go. 
 
 ## Instructions
