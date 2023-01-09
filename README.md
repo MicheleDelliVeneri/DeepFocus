@@ -164,6 +164,7 @@ model hyperparameters and architectures. In order to start a sweep, the followin
 ## Missing Features 
 - SKA Training Dataloader
 - General Example Dataloader to modify for new data
+- Add GAN and SGAN networks
 
 
 
