@@ -899,7 +899,7 @@ class TNGDataset(Dataset):
             print('Original Fits Target image properties: ', '\nMin: ', otarget.min(),
                 '\nMax: ',  otarget.max(), '\nMean: ', otarget.mean(), '\nStd: ', otarget.std(),
                 '\nIntegral: ', np.sum(otarget))
-       
+        print(input_.shape, target_.shape)
         return input_, target_
 
 # --------------------- ALMA DATASET DATALOADING UTILS --------------------- #
@@ -1114,6 +1114,7 @@ def find_params(data_dir, filenames, input_shape, channel_names, preprocess=None
         return means, stds, max_
     elif len(input_shape) == 3:
         return
+
 
 def TNG_build_dataset(data_path, catalogue_path, preprocess='log',
                       normalize=True,
