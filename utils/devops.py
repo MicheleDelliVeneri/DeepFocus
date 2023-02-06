@@ -46,7 +46,6 @@ def TNG_load_data(data_path, catalogue_path, bands, targets):
     target_info['ids'] = np.array([int("".join([t for t in tid.split('_')[0] if t.isdigit()])) for tid in targets])
     target_info['orientations'] = np.array([int(tid.split('_')[1][1]) for tid in targets])
     target_info['len'] = len(targets) // len(np.unique(target_info['orientations']))
-
     
     print('You have selected the following bands:')
     for key, value in band_info.items():
@@ -55,7 +54,9 @@ def TNG_load_data(data_path, catalogue_path, bands, targets):
     print('and the following target:')
     print(target_info['len'], len(np.unique(target_info['orientations'])), len(target_info['ids']))
     print('Number of simulations in catalogue: ', len(idlist))
-
+    catalogue = catalogue[catalogue['ID'].isin(target_info['ids'])]
+    
+    idlist = catalogue['ID'].values
 
 
 #euclid_ids = np.array([int("".join([t for t in tid.split('_')[0] if (t.isdigit())])) for tid in euclid_filelist])
