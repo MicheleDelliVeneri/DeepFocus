@@ -184,12 +184,12 @@ targets = torch.permute(batch['target'][tio.DATA], (0, 4, 2, 3, 1)).numpy()
 ids = batch['id']
 orientations = batch['orientation']
 
-for i in range(batch_size):
+for i in tqdm(range(batch_size), total=batch_size, desc='Plotting Samples'):
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
     input_ = inputs[i][0]
     target = targets[i][0]
-    #print('Input: min {}, max {}'.format(np.min(input_), np.max(input_)))
-    #print('Target: min {}, max {}'.format(np.min(target), np.max(target)))
+    print('Input: min {}, max {}'.format(np.min(input_), np.max(input_)))
+    print('Target: min {}, max {}'.format(np.min(target), np.max(target)))
     input = np.sum(input_, axis=2)
     spectrum = np.sum(input_, axis=(0, 1))
     input = np.log10(input + 1e-10)
@@ -201,8 +201,10 @@ for i in range(batch_size):
     plt.colorbar(im1, ax=ax[1])
     plt.title('Input ID: {}, Orientation: {}'.format(ids[i], orientations[i]))
     plt.savefig('test_{}.png'.format(i))
+    plt.close()
     plt.figure(figsize=(10, 5))
     plt.plot(spectrum)
     plt.title('Input ID: {}, Orientation: {}'.format(ids[i], orientations[i]))
     plt.savefig('spectrum_{}.png'.format(i))
+    plt.close()
 
