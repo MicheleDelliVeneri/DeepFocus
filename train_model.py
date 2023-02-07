@@ -45,6 +45,9 @@ config = dict(
     debug=False,
     log_rate = 25,
     preprocess = 'log',
+    num_workers = 4, 
+    num_gpus = 1,
+    num_nodes = 1,
 )
 
 
