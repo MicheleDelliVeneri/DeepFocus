@@ -68,14 +68,14 @@ def get_TNG_dataloaders(data_path, catalogue_path, bands, targets, train_size, t
        
         band_info[band] = {}
         band_info[band]['files'] = band_files
-        band_info[band]['ids'] = np.array([int("".join([t for t in tid.split('_')[0] if t.isdigit()])) for tid in band_files])
+        band_info[band]['ids'] = np.array([int("".join([t for t in tid.split('_')[0].split('/')[-1] if t.isdigit()])) for tid in band_files])
         band_info[band]['orientations'] = np.array([int(tid.split('_')[1][1]) for tid in band_files])
         band_info[band]['len'] = len(band_files) // len(np.unique(band_info[band]['orientations']))
     
     target_info = {}
     targets_files = [os.path.join(targets_dir, file) for file in os.listdir(targets_dir) if targets in file]
     target_info['targets'] = np.array(targets_files)
-    target_info['ids'] = np.array([int("".join([t for t in tid.split('_')[0] if t.isdigit()])) for tid in targets_files])
+    target_info['ids'] = np.array([int("".join([t for t in tid.split('_')[0].split('/')[-1] if t.isdigit()])) for tid in targets_files])
     target_info['orientations'] = np.array([int(tid.split('_')[1][1]) for tid in targets_files])
     target_info['len'] = len(targets_files) // len(np.unique(target_info['orientations']))
     
@@ -169,15 +169,19 @@ def get_TNG_dataloaders(data_path, catalogue_path, bands, targets, train_size, t
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     return training_dataloader, validation_dataloader, test_dataloader
 
-catalogue_path = '/ibiscostorage/mdelliveneri/EUCLID/catalog/galaxyCatalogue.txt'
-path = '/ibiscostorage/mdelliveneri/EUCLID/results'
+catalogue_path = '/ibiscostorage/mdelliveneri/EUCLID/version2/catalog/galaxyCatalogue.txt'
+path = '/ibiscostorage/mdelliveneri/EUCLID/version2/results'
 all_bands = ['MASS_H', '2MASS_J', '2MASS_Ks', 'Euclid_H', 'Euclid_J', 'Euclid_VIS', 'Euclid_Y', 'GALEX_FUV', 'GALEX_NUV', 'Johnson_B', 'Johnson_I', 
         'Johnson_R', 'Johnson_U', 'Johnson_V', 'LSST_g', 'LSST_i', 'LSST_r', 'LSST_u', 'LSST_y', 'LSST_z', 'WISE_W1', 'WISE_W2']
 
 bands = ['GALEX_FUV', 'GALEX_NUV', 'LSST_u', 'LSST_g', 'LSST_r', 'LSST_i', 'LSST_z', 'Euclid_Y','Euclid_J', 'Euclid_H']
 batch_size = 32
-targets = 'dustmass'
-train_dataloader, validation_dataloader, test_dataloader = get_TNG_dataloaders(path, catalogue_path, bands, targets, train_size=0.8, batch_size=batch_size)
+output_path = '/ibiscostorage/mdelliveneri/EUCLID/version2/plots'
+if os.path.exists(output_path) == False:
+    os.mkdir(output_path)
+
+target_name = 'dustmass'
+train_dataloader, validation_dataloader, test_dataloader = get_TNG_dataloaders(path, catalogue_path, bands, target_name, train_size=0.8, batch_size=batch_size)
 batch = next(iter(train_dataloader))
 inputs = torch.permute(batch['input'][tio.DATA], (0, 4, 2, 3, 1)).numpy()
 targets = torch.permute(batch['target'][tio.DATA], (0, 4, 2, 3, 1)).numpy()
@@ -188,23 +192,26 @@ for i in tqdm(range(batch_size), total=batch_size, desc='Plotting Samples'):
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
     input_ = inputs[i][0]
     target = targets[i][0]
-    print('Input: min {}, max {}'.format(np.min(input_), np.max(input_)))
-    print('Target: min {}, max {}'.format(np.min(target), np.max(target)))
     input = np.sum(input_, axis=2)
     spectrum = np.sum(input_, axis=(0, 1))
-    input = np.log10(input + 1e-10)
+    input = np.log10(input + np.min(input) + 1e-10)
     target = np.sum(target, axis=2)
-    target = np.log10(target + 1e-10)
+    target = np.log10(target + np.min(target) + 1e-10)
     im0=ax[0].imshow(input, origin='lower', cmap='magma', label='Input')
     plt.colorbar(im0, ax=ax[0])
     im1=ax[1].imshow(target, origin='lower', cmap='magma', label='Target')
     plt.colorbar(im1, ax=ax[1])
-    plt.title('Input ID: {}, Orientation: {}'.format(ids[i], orientations[i]))
-    plt.savefig('test_{}.png'.format(i))
+    ax[0].set_title('Input Integrated Bands ID: {}, Orientation: {}'.format(ids[i], orientations[i]))
+    ax[1].set_title('Target {}'.format(target_name))
+    ax[0].set_xlabel('x')
+    ax[0].set_ylabel('y')
+    ax[1].set_xlabel('x')
+    ax[1].set_ylabel('y')
+    plt.savefig(os.path.join(output_path, 'Input_Output_Comparison_{}_{}_{}.png'.format(i, ids[i], orientations[i])))
     plt.close()
     plt.figure(figsize=(10, 5))
     plt.plot(spectrum)
     plt.title('Input ID: {}, Orientation: {}'.format(ids[i], orientations[i]))
-    plt.savefig('spectrum_{}.png'.format(i))
+    plt.savefig(os.path.join(output_path, 'Input_Spectrum_{}_{}_{}.png'.format(i, ids[i], orientations[i])))
     plt.close()
 
