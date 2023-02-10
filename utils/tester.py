@@ -145,7 +145,7 @@ def get_TNG_dataloaders(data_path, catalogue_path, bands, targets, train_size, t
             targets = [targets]
 
         samples = []
-        for id in tqdm(ids, desc='Loading {} Samples'.format(mode), total=len(ids)):
+        for id in tqdm(ids, desc='Storing {} samples into the dataloader'.format(mode), total=len(ids)):
             orientations = np.arange(1, n_orientations + 1)
             np.random.shuffle(orientations)
             for orientation in orientations:
@@ -176,7 +176,7 @@ all_bands = ['MASS_H', '2MASS_J', '2MASS_Ks', 'Euclid_H', 'Euclid_J', 'Euclid_VI
 
 bands = ['GALEX_FUV', 'GALEX_NUV', 'LSST_u', 'LSST_g', 'LSST_r', 'LSST_i', 'LSST_z', 'Euclid_Y','Euclid_J', 'Euclid_H']
 batch_size = 32
-output_path = '/ibiscostorage/mdelliveneri/EUCLID/version2/plots'
+output_path = '/ibiscostorage/mdelliveneri/EUCLID/version2/plots/examples'
 if os.path.exists(output_path) == False:
     os.mkdir(output_path)
 
@@ -188,30 +188,45 @@ targets = torch.permute(batch['target'][tio.DATA], (0, 4, 2, 3, 1)).numpy()
 ids = batch['id']
 orientations = batch['orientation']
 
-for i in tqdm(range(batch_size), total=batch_size, desc='Plotting Samples'):
-    fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-    input_ = inputs[i][0]
-    target = targets[i][0]
-    input = np.sum(input_, axis=2)
-    spectrum = np.sum(input_, axis=(0, 1))
-    input = np.log10(input + np.min(input) + 1e-10)
-    target = np.sum(target, axis=2)
-    target = np.log10(target + np.min(target) + 1e-10)
-    im0=ax[0].imshow(input, origin='lower', cmap='magma', label='Input')
-    plt.colorbar(im0, ax=ax[0])
-    im1=ax[1].imshow(target, origin='lower', cmap='magma', label='Target')
-    plt.colorbar(im1, ax=ax[1])
-    ax[0].set_title('Input Integrated Bands ID: {}, Orientation: {}'.format(ids[i], orientations[i]))
-    ax[1].set_title('Target {}'.format(target_name))
-    ax[0].set_xlabel('x')
-    ax[0].set_ylabel('y')
-    ax[1].set_xlabel('x')
-    ax[1].set_ylabel('y')
-    plt.savefig(os.path.join(output_path, 'Input_Output_Comparison_{}_{}_{}.png'.format(i, ids[i], orientations[i])))
-    plt.close()
-    plt.figure(figsize=(10, 5))
-    plt.plot(spectrum)
-    plt.title('Input ID: {}, Orientation: {}'.format(ids[i], orientations[i]))
-    plt.savefig(os.path.join(output_path, 'Input_Spectrum_{}_{}_{}.png'.format(i, ids[i], orientations[i])))
-    plt.close()
+for i_batch, batch in tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc='Plotting Samples'):
+    inputs = torch.permute(batch['input'][tio.DATA], (0, 4, 2, 3, 1)).numpy()
+    targets = torch.permute(batch['target'][tio.DATA], (0, 4, 2, 3, 1)).numpy()
+    ids = batch['id']
+    orientations = batch['orientation']
+    for i in tqdm(range(batch_size), total=batch_size, desc='Plotting batch {}'.format(i_batch), leave=False):
+        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+        input_ = inputs[i][0]
+        target = targets[i][0]
+        integrated = np.sum(input_, axis=2)
+        spectrum = np.sum(input_, axis=(0, 1))
+        integrated = np.log10(integrated + np.min(integrated) + 1e-10)
+        target = np.sum(target, axis=2)
+        target = np.log10(target + np.min(target) + 1e-10)
+        im0=ax[0].imshow(integrated, origin='lower', cmap='magma', label='Input')
+        plt.colorbar(im0, ax=ax[0])
+        im1=ax[1].imshow(target, origin='lower', cmap='magma', label='Target')
+        plt.colorbar(im1, ax=ax[1])
+        ax[0].set_title('Input Integrated Bands ID: {}, Orientation: {}'.format(ids[i], orientations[i]))
+        ax[1].set_title('Target {}'.format(target_name))
+        ax[0].set_xlabel('x')
+        ax[0].set_ylabel('y')
+        ax[1].set_xlabel('x')
+        ax[1].set_ylabel('y')
+        plt.savefig(os.path.join(output_path, 'Input_Output_Comparison_{}_{}_{}.png'.format(i, ids[i], orientations[i])))
+        plt.close()
+        plt.figure(figsize=(10, 5))
+        plt.plot(spectrum)
+        plt.title('Input ID: {}, Orientation: {}'.format(ids[i], orientations[i]))
+        plt.savefig(os.path.join(output_path, 'Input_Spectrum_{}_{}_{}.png'.format(i, ids[i], orientations[i])))
+        plt.close()
+
+        fig, axs = plt.subplots(n_rows=2, n_colls=len(bands) // 2, figsize=(5 * len(bands) // 5, 10))
+        for k in range(2):
+            for j in range(len(bands)  // 2):
+                im = axs[k, j].imshow(np.log(input_[j] + np.min(input_[j]) + 1e-10), origin='lower', cmap='magma')
+                axs[k, j].set_title('{}'.format(bands[j]))
+                axs[k, j].set_xlabel('x')
+                axs[k, j].set_ylabel('y')
+                plt.colorbar(im, ax=ax[j])
+        plt.savefig(os.path.join(output_path, 'Input_Bands_{}_{}_{}.png'.format(i, ids[i], orientations[i])))
 
