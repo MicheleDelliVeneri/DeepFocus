@@ -220,13 +220,14 @@ for i_batch, batch in tqdm(enumerate(train_dataloader), total=len(train_dataload
         plt.savefig(os.path.join(output_path, 'Input_Spectrum_{}_{}_{}.png'.format(i, ids[i], orientations[i])))
         plt.close()
 
-        fig, axs = plt.subplots(n_rows=2, n_colls=len(bands) // 2, figsize=(5 * len(bands) // 5, 10))
+        fig, axs = plt.subplots(nrows=2, ncols=len(bands) // 2, figsize=(5 * len(bands) // 2, 10))
         for k in range(2):
             for j in range(len(bands)  // 2):
-                im = axs[k, j].imshow(np.log(input_[j] + np.min(input_[j]) + 1e-10), origin='lower', cmap='magma')
+                im = axs[k, j].imshow(np.log(input_[:, :, j] + np.min(input_[:, :, j]) + 1e-10), origin='lower', cmap='magma')
                 axs[k, j].set_title('{}'.format(bands[j]))
                 axs[k, j].set_xlabel('x')
                 axs[k, j].set_ylabel('y')
-                plt.colorbar(im, ax=ax[j])
+                plt.colorbar(im, ax=axs[k, j])
+        plt.tight_layout()
         plt.savefig(os.path.join(output_path, 'Input_Bands_{}_{}_{}.png'.format(i, ids[i], orientations[i])))
-
+        plt.close()
