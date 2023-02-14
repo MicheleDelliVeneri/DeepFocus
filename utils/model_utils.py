@@ -159,6 +159,11 @@ class batch_act(nn.Module):
         x = self.bn(x)
         return x
 
+class Conv1dAuto(nn.Conv1d):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.padding =  (self.kernel_size[0] // 2)  # dynamic add padding based on the kernel_size
+
 class Conv2dAuto(nn.Conv2d):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -168,6 +173,12 @@ class Conv3dAuto(nn.Conv3d):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.padding =  (self.kernel_size[0] // 2, self.kernel_size[1] // 2, self.kernel_size[2] // 2)  # dynamic add padding based on the kernel_size
+
+
+class ConvTran1dAuto(nn.ConvTranspose1d):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.padding =  ((self.kernel_size[0] - 1) // 2)  # dynamic add padding based on the kernel_size
 
 class ConvTran2dAuto(nn.ConvTranspose2d):
     def __init__(self, *args, **kwargs):
@@ -214,7 +225,12 @@ class ResNetResidualBlock(ResidualBlock):
     def __init__(self, in_channels, out_channels, conv, expansion=1, downsampling=1, *args, **kwargs):
         super().__init__(in_channels, out_channels, *args, **kwargs)
         self.expansion, self.downsampling, self.conv = expansion, downsampling, conv
-        if self.dim == 2:
+        if self.dim ==1:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(self.in_channels, self.expanded_channels, kernel_size=1,
+                      stride=self.downsampling, bias=False),
+                nn.BatchNorm1d(self.expanded_channels)) if self.should_apply_shortcut else None    
+        elif self.dim == 2:
             self.shortcut = nn.Sequential(
                 nn.Conv2d(self.in_channels, self.expanded_channels, kernel_size=1,
                       stride=self.downsampling, bias=False),
@@ -234,7 +250,9 @@ class ResNetResidualBlock(ResidualBlock):
         return self.in_channels != self.expanded_channels
 
 def conv_bn(in_channels, out_channels, conv, dim=2, *args, **kwargs):
-    if dim == 2:
+    if dim ==1:
+        return nn.Sequential(conv(in_channels, out_channels, *args, **kwargs), nn.BatchNorm1d(out_channels))
+    elif dim == 2:
         return nn.Sequential(conv(in_channels, out_channels, *args, **kwargs), nn.BatchNorm2d(out_channels))
     elif dim == 3:
         return nn.Sequential(conv(in_channels, out_channels, *args, **kwargs), nn.BatchNorm3d(out_channels))
@@ -246,7 +264,13 @@ class ResNetBasicBlock(ResNetResidualBlock):
     expansion = 1
     def __init__(self, in_channels, out_channels, conv, *args, **kwargs):
         super().__init__(in_channels, out_channels, conv,  *args, **kwargs)
-        if self.dim == 2:
+        if self.dim == 1:
+            self.blocks = nn.Sequential(
+                conv_bn(self.in_channels, self.out_channels, self.conv, bias=False, stride=self.downsampling),
+                activation_func(self.activation),
+                conv_bn(self.out_channels, self.expanded_channels, self.conv, bias=False),
+            )
+        elif self.dim == 2:
             self.blocks = nn.Sequential(
                 conv_bn(self.in_channels, self.out_channels, self.conv, bias=False, stride=self.downsampling),
                 activation_func(self.activation),
@@ -262,7 +286,15 @@ class ResNetBottleNeckBlock(ResNetResidualBlock):
     expansion = 4
     def __init__(self, in_channels, out_channels, conv, *args, **kwargs):
         super().__init__(in_channels, out_channels, conv, expansion=4, *args, **kwargs)
-        if self.dim == 2:
+        if self.dim == 1:
+            self.blocks = nn.Sequential(
+                conv_bn(self.in_channels, self.out_channels, self.conv, self.dim, kernel_size=1),
+                activation_func(self.activation),
+                conv_bn(self.out_channels, self.out_channels, self.conv, self.dim, stride=self.downsampling),
+                activation_func(self.activation),
+                conv_bn(self.out_channels, self.expanded_channels, self.conv, self.dim, kernel_size=1),
+            )
+        elif self.dim == 2:
             self.blocks = nn.Sequential(
                 conv_bn(self.in_channels, self.out_channels, self.conv, kernel_size=1),
                 activation_func(self.activation),
@@ -287,7 +319,9 @@ class ResNetLayer(nn.Module):
         super().__init__()
         # 'We perform downsampling directly by convolutional layers that have a stride of 2.'
         downsampling = 2 if in_channels != out_channels else 1
-        if dim == 2:
+        if dim == 1:
+            conv = partial(Conv1dAuto, kernel_size=kernel_size)
+        elif dim == 2:
             conv = partial(Conv2dAuto, kernel_size=kernel_size)
         elif dim == 3:
             conv = partial(Conv3dAuto, kernel_size=kernel_size)
@@ -328,7 +362,15 @@ class ResNetEncoder(nn.Module):
             self.expansion = 1
         elif block == ResNetBottleNeckBlock:
             self.expansion = 4
-        if len(self.input_shape) == 2:
+        if len(self.input_shape) == 1:
+            self.dim = 1
+            self.gate = nn.Sequential(
+                nn.Conv1d(in_channels, self.blocks_sizes[0], kernel_size=7, stride=2, padding=3, bias=False),
+                nn.BatchNorm1d(self.blocks_sizes[0]),
+                activation_func(activation),
+                nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+            )
+        elif len(self.input_shape) == 2:
             self.dim = 2
             self.gate = nn.Sequential(
                 nn.Conv2d(in_channels, self.blocks_sizes[0], kernel_size=7, stride=2, padding=3, bias=False),
@@ -407,7 +449,17 @@ class ResNetDecoderLayer(nn.Module):
         super().__init__()
         self.dim = dim
         self.activation = activation
-        if self.dim == 2:
+        if self.dim == 1:
+            self.interpolate = Interpolate(scale_factor=2, mode='linear', align_corners=True) 
+            tconv = partial(ConvTran1dAuto, kernel_size=kernel_size)
+            self.upsample = nn.Sequential(
+                tconv(in_channels, out_channels, stride=2, padding=1, output_padding=1),
+                #nn.ConvTranspose2d(in_channels, out_channels, kernel_size=kernel_size, stride=2, padding=1, output_padding=1),
+                nn.BatchNorm1d(out_channels),
+                activation_func(activation)
+            )
+            conv = partial(Conv1dAuto, kernel_size=kernel_size)
+        elif self.dim == 2:
             self.interpolate = Interpolate(scale_factor=2, mode='bilinear', align_corners=True)
             tconv = partial(ConvTran2dAuto, kernel_size=kernel_size)
             self.upsample = nn.Sequential(
@@ -490,7 +542,33 @@ class ResNetDecoder(nn.Module):
         self.in_out_block_sizes_kernels = list(zip(blocks_sizes[1:], blocks_sizes[2:], kernel_sizes[1:]))
         self.out_block_sizes_kernels = list(zip(oblocks_sizes, oblocks_sizes[1:], okernel_sizes))
         print('Expansion factor: ', self.expansion)
-        if len(self.input_shape) == 2:
+        
+        if len(self.input_shape) == 1:
+            self.dim = 1
+            self.dense = nn.Sequential(
+                    nn.Linear(self.hidden_size, blocks_sizes[0] * self.expansion * input_shape[0] // 2**(len(self.blocks_sizes) + 1) * input_shape[1] // 2**(len(self.blocks_sizes) + 1)),
+                    activation_func(activation))
+
+            self.unflatten = nn.Unflatten(dim=1, shape=(blocks_sizes[0] * self.expansion, 
+                                input_shape[0] // 2**(len(self.blocks_sizes) + 1), 
+                                input_shape[1] // 2**(len(self.blocks_sizes) + 1)))
+            self.blocks = nn.ModuleList([ 
+                ResNetDecoderLayer(blocks_sizes[0] * self.expansion, blocks_sizes[1], kernel_sizes[0], block=block, *args, **kwargs, 
+                                    dim=self.dim, activation=self.activation),
+                *[ResNetDecoderLayer(in_channels * self.expansion, 
+                                 out_channels * self.expansion, kernel_size, block=block, *args, **kwargs, 
+                                 dim=self.dim, activation=self.activation) 
+                 for (in_channels, out_channels, kernel_size) in self.in_out_block_sizes_kernels]       
+            ])
+            self.oblocks = nn.ModuleList([ResNetDecoderLayer(in_channels * self.expansion, 
+                                 out_channels, kernel_size, block=block, *args, **kwargs, 
+                                 dim=self.dim, activation=self.activation) 
+              for (in_channels, out_channels, kernel_size) in self.out_block_sizes_kernels])
+            self.out = nn.Sequential(
+                nn.Conv1d(self.oblocks_sizes[-1] * self.expansions, self.output_channels, kernel_size=1, padding=0),
+                activation_func(final_activation))
+            
+        elif len(self.input_shape) == 2:
             self.dim = 2
             self.dense = nn.Sequential(
                     nn.Linear(self.hidden_size, blocks_sizes[0] * self.expansion * input_shape[0] // 2**(len(self.blocks_sizes) + 1) * input_shape[1] // 2**(len(self.blocks_sizes) + 1)),
