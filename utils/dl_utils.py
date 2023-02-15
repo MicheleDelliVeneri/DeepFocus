@@ -32,6 +32,11 @@ import matplotlib
 from matplotlib import gridspec
 from math import exp
 import model_utils as mu
+import torch.multiprocessing as mp
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
+import os
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # -----------------------  TNG DATASET DATALOADING UTILS ----------------------- #
@@ -164,7 +169,29 @@ class TNGDataset(Dataset):
         print(input_.shape, target_.shape)
         return input_, target_
 
-def get_TNG_dataloaders(data_path, catalogue_path, bands, targets, train_size, training_transforms=None, validation_transforms=None, batch_size=1, num_workers=4):
+def get_TNG_dataloaders(data_path, catalogue_path, bands, targets, train_size, 
+                        training_transforms=None, validation_transforms=None, 
+                        batch_size=1, num_workers=4, multi_gpu=False):
+    """
+    This function returns the training and validation dataloaders for the TNG dataset. 
+    INPUTS:
+        data_path: path to the directory containing the TNG data (string)
+        catalogue_path: path to the TNG catalogue (string)
+        bands: list of bands to load, the order matters (list of strings)
+        targets: list of targets to load, the order matters (list of strings)
+        train_size: fraction of the data to use for training (float)
+        training_transforms: transforms to apply to the training data (torchio.transforms)
+        validation_transforms: transforms to apply to the validation data (torchio.transforms)
+        batch_size: number of samples per batch (int)
+        num_workers: number of workers to use for data loading (int)
+        multi_gpu: whether to use multiple GPUs (bool)
+    OUTPUTS:
+        train_loader: training dataloader (torch.utils.data.DataLoader)
+        val_loader: validation dataloader (torch.utils.data.DataLoader)
+        test_loader: test dataloader (torch.utils.data.DataLoader)
+
+    """
+    
     catalogue = load_catalogue(catalogue_path)
     idlist = catalogue['subhalo ID'].values
     euclid_lsst_dir = os.path.join(data_path, 'euclid+lsst')
@@ -195,14 +222,14 @@ def get_TNG_dataloaders(data_path, catalogue_path, bands, targets, train_size, t
        
         band_info[band] = {}
         band_info[band]['files'] = band_files
-        band_info[band]['ids'] = np.array([int("".join([t for t in tid.split('_')[0] if t.isdigit()])) for tid in band_files])
+        band_info[band]['ids'] = np.array([int("".join([t for t in tid.split('_')[0].split('/')[-1] if t.isdigit()])) for tid in band_files])
         band_info[band]['orientations'] = np.array([int(tid.split('_')[1][1]) for tid in band_files])
         band_info[band]['len'] = len(band_files) // len(np.unique(band_info[band]['orientations']))
     
     target_info = {}
     targets_files = [os.path.join(targets_dir, file) for file in os.listdir(targets_dir) if targets in file]
     target_info['targets'] = np.array(targets_files)
-    target_info['ids'] = np.array([int("".join([t for t in tid.split('_')[0] if t.isdigit()])) for tid in targets_files])
+    target_info['ids'] = np.array([int("".join([t for t in tid.split('_')[0].split('/')[-1] if t.isdigit()])) for tid in targets_files])
     target_info['orientations'] = np.array([int(tid.split('_')[1][1]) for tid in targets_files])
     target_info['len'] = len(targets_files) // len(np.unique(target_info['orientations']))
     
@@ -272,7 +299,7 @@ def get_TNG_dataloaders(data_path, catalogue_path, bands, targets, train_size, t
             targets = [targets]
 
         samples = []
-        for id in tqdm(ids, desc='Loading {} Samples'.format(mode), total=len(ids)):
+        for id in tqdm(ids, desc='Storing {} samples into the dataloader'.format(mode), total=len(ids)):
             orientations = np.arange(1, n_orientations + 1)
             np.random.shuffle(orientations)
             for orientation in orientations:
@@ -280,18 +307,38 @@ def get_TNG_dataloaders(data_path, catalogue_path, bands, targets, train_size, t
                 target_paths = get_path_from_dictionary(targets_catalogue, id, orientation, targets)
                 sample = tio.Subject(
                     input=tio.ScalarImage(paths, reader=TNGReader),
-                    target=tio.ScalarImage(target_paths, reader=TNGReader)
+                    target=tio.ScalarImage(target_paths, reader=TNGReader),
+                    id=id,
+                    orientation=orientation
                 )
                 samples.append(sample)
         dataset = tio.SubjectsDataset(samples, transform=transforms)
         return dataset
 
-    training_dataset = create_subjects_dataset(inputs_catalogue, targets_catalogue, train_ids, target_info, targets, bands, training_transforms, mode='Training')
-    validation_dataset = create_subjects_dataset(inputs_catalogue, targets_catalogue, val_ids, target_info, targets, bands, validation_transforms, mode='Validation')
-    test_dataset = create_subjects_dataset(inputs_catalogue, targets_catalogue, test_ids, target_info, targets, bands, validation_transforms, mode='Test')
-    training_dataloader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-    validation_dataloader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    training_dataset = create_subjects_dataset(inputs_catalogue, targets_catalogue, train_ids, target_info, targets, 
+                                                bands, training_transforms, mode='Training')
+    validation_dataset = create_subjects_dataset(inputs_catalogue, targets_catalogue, val_ids, target_info, targets, 
+                                                bands, validation_transforms, mode='Validation')
+    test_dataset = create_subjects_dataset(inputs_catalogue, targets_catalogue, test_ids, target_info, targets, 
+                                                bands, validation_transforms, mode='Test')
+    if multi_gpu is True:
+        training_dataloader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, 
+                                                      shuffle=False, num_workers=num_workers, pin_memory=True, 
+                                                      sampler=DistributedSampler(training_dataset))
+        validation_dataloader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, 
+                                                        shuffle=False, num_workers=num_workers, pin_memory=True, 
+                                                        sampler=DistributedSampler(validation_dataset))
+        test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, 
+                                                  shuffle=False, num_workers=num_workers, pin_memory=True, 
+                                                  sampler=DistributedSampler(test_dataset))
+    
+    else:
+        training_dataloader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, 
+                                                      shuffle=True, num_workers=num_workers, pin_memory=True)
+        validation_dataloader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, 
+                                                        shuffle=False, num_workers=num_workers, pin_memory=True)
+        test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, 
+                                                  shuffle=False, num_workers=num_workers, pin_memory=True)
     return training_dataloader, validation_dataloader, test_dataloader
 
 # --------------------- ALMA DATASET DATALOADING UTILS --------------------- #
@@ -369,7 +416,7 @@ def ALMAreader(path):
     return data, affine
 
 def get_ALMA_dataloaders(root_dir, training_transforms=None, validation_transforms=None, 
-                        batch_size=32,  num_workers=4):
+                        batch_size=32,  num_workers=4, multi_gpu=False):
     train_dir = root_dir + 'Train'
     valid_dir = root_dir + 'Validation'
     train_dirty_list = np.array(natsorted([
@@ -422,9 +469,17 @@ def get_ALMA_dataloaders(root_dir, training_transforms=None, validation_transfor
         num_workers = nws[np.argmin(times)]
         print("Best num_workers is {}".format(num_workers))
 
-    training_dataloader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, 
+    if multi_gpu == True:
+        training_dataloader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, 
+                            shuffle=False, num_workers=num_workers, pin_memory=True, 
+                            sampler=DistributedSampler(training_dataset))
+        validation_dataloader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, 
+                            shuffle=False, num_workers=num_workers, pin_memory=True, 
+                            sampler=DistributedSampler(validation_dataset))
+    else:
+        training_dataloader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, 
                             shuffle=True, num_workers=num_workers, pin_memory=True)
-    validation_dataloader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, 
+        validation_dataloader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, 
                             shuffle=False, num_workers=num_workers, pin_memory=True)
     return training_dataloader, validation_dataloader
 
@@ -506,7 +561,6 @@ def find_params(data_dir, filenames, input_shape, channel_names, preprocess=None
         return means, stds, max_
     elif len(input_shape) == 3:
         return
-
 
 def TNG_build_dataset(data_path, catalogue_path, preprocess='log',
                       normalize=True,
@@ -1205,3 +1259,234 @@ def test(config=None):
             print('DeepFocus Loss: {}}'.format(loss))
             print('DeepFocus Residual: {}'.format(res))
             wandb.log({"test loss": loss, "test residual": res}) 
+
+
+def ddp_setup():
+    init_process_group(backend='nccl')
+
+class Trainer:
+    def __init__(self, config: dict) -> None:
+        # get the config dictionary
+        # get local and global ranks
+        self.local_rank = int(os.environ['LOCAL_RANK'])
+        self.global_rank = int(os.environ['RANK'])
+        # initialize wandb from the config dictionary
+        with wandb.init(config, project=config['project'], name=config['name'], entity=config['entity']):
+            self.config = wandb.config
+            self.run_id = wandb.id
+            self.starting_time = datetime.datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+            self.config['model_name'] = self.config['dataset'] + '_' + self.config['dmode'] + '_' + str(self.run_id) + '_' + self.starting_time
+            if config['normalize'] is True:
+                training_transforms = tio.Compose([
+                        tio.RandomFlip(axes=(0, 1), p=1),
+                        tio.RandomAffine(scales=0, degrees=(0, 0, 90), translation=0, p=1),
+                        tio.CropOrPad((256, 256, 128)),
+                        tio.RescaleIntensity((0, 1))
+                         ])
+                validation_transforms = tio.Compose([
+                        tio.CropOrPad((256, 256, 128)),
+                        tio.RescaleIntensity((0, 1))])
+            else:
+                training_transforms = tio.Compose([
+                        tio.RandomFlip(axes=(0, 1), p=1),
+                        tio.RandomAffine(scales=0, degrees=(0, 0, 90), translation=0, p=1),
+                        tio.CropOrPad((256, 256, 128))
+                        ])
+                validation_transforms = tio.Compose([
+                        tio.CropOrPad((256, 256, 128))])
+            if self.config['dataset'] == 'ALMA':
+                print('Loading data... for {} model in mode {}'.format(self.config['model_name'], self.config['dmode']))
+                
+                self.train_data, self.valid_data = get_ALMA_dataloaders(self.config['data_path'], 
+                                            training_transforms,
+                                            validation_transforms,
+                                            self.config['batch_size'],
+                                            self.config['num_workers'], 
+                                            self.config['multi_gpu'])
+            elif self.config['dataset'] == 'EUCLID':
+                print('Loading data... for {} model in mode {}'.format(self.config['model_name'], self.config['dmode']))
+                self.train_data, self.valid_data, _ = get_TNG_dataloaders(self.config['data_path'], self.config['catalogue_path'], 
+                                                                    self.config['bands'], self.config['targets'], self.config['train_size'],
+                                                                    training_transforms, validation_transforms, self.config['batch_size'], self.config['num_workers'])
+            print('Data loaded')
+            if self.config['block'] == 'basic':
+                encoder_block = mu.ResNetBasicBlock
+                decoder_block = mu.ResNetBasicBlock
+            elif self.config['block'] == 'bottleneck':
+                encoder_block = mu.ResNetBottleNeckBlock
+                decoder_block = mu.ResNetBottleNeckBlock
+            else:
+                encoder_block = mu.ResNetBasicBlock
+                decoder_block = mu.ResNetBasicBlock
+            model = mu.DeepFocus(in_channels=config['in_channels'], out_channels=config['out_channels'], 
+                 blocks_sizes=config['block_sizes'],
+                 oblocks_sizes=config['oblock_sizes'],
+                 encoder_kernel_sizes=config['kernel_sizes'],
+                 depths = config['depths'],
+                 decoder_kernel_sizes=config['kernel_sizes'],
+                 output_kernel_sizes=config['output_kernel_sizes'],
+                 hidden_size=config['hidden_size'],
+                 encoder_activation=config['encoder_activation'],
+                 decoder_activation=config['decoder_activation'],
+                 encoder_block=encoder_block,
+                 decoder_block=decoder_block,
+                 final_activation=config['final_activation'],
+                 input_shape=config['input_shape'],
+                 skip_connections=config['skip_connections'],
+                 debug=config['debug'],
+                 dmode=config['dmode'],
+                 dropout_rate=config['dropout_rate'])
+            
+            self.save_every = self.config['save_frequency']
+            self.epochs_run = 0
+            self.snapshot_path = os.path.join(self.config['output_path'], self.config['project_name'] + '_' + self.config['model_name'] + str(self.run_id) + '.pt')
+            self.woutput_path = os.path.join(self.config['output_path'], self.config['project_name'] + '_' + self.config['model_name'] + str(self.run_id) + '.onnx')
+            if os.path.exists(self.snapshot_path):
+                print("Loading snapshot")
+                self._load_snapshot(self.snapshot_path)
+            if os.path.exists(self.snapshot_path) is False:
+                os.mkdir(self.snapshot_path)
+            
+            if self.local_rank == 0 and self.epoch_run % self.save_every == 0:
+                torch.onnx.export(model, 
+                        torch.randn(self.config['input_shape']).unsqueeze(0).unsqueeze(0).to(device),
+                        self.woutpu_path)
+                wandb.save(self.woutpath, policy='now')
+
+            self.criterion = mu.build_loss(self.config['criterion'], self.config['input_shape'])
+            self.optimizer = mu.build_optimizer(self.config['optimizer'], 
+                                    model, self.config['learning_rate'],
+                                    self.config['weight_decay'])
+
+
+            if self.config['multi_gpu'] == True:
+                self.model = model.to(self.local_rank)
+                self.model = DDP(self.model, device_ids=[self.local_rank])
+
+            else:
+                self.local_rank = device
+                self.model = model.to(self.local_rank)
+            wandb.watch(self.model, self.criterion, log='all', log_freq=self.config['log_rate'])
+
+    def _load_snapshot(self, snapshot_path):
+        loc = f"cuda:{self.local_rank}"
+        snapshot = torch.load(snapshot_path, map_location=loc)
+        self.model.load_state_dict(snapshot["MODEL_STATE"])
+        self.epochs_run = snapshot["EPOCHS_RUN"]
+        print(f"Resuming training from snapshot at Epoch {self.epochs_run}")
+         
+    def _save_snapshot(self, epoch):
+        snapshot = {
+            "MODEL_STATE": self.model.module.state_dict(),
+            "EPOCHS_RUN": epoch,
+        }
+        torch.save(snapshot, self.snapshot_path)
+        print(f"Epoch {epoch} | Training snapshot saved at {self.snapshot_path}") 
+
+    def _run_batch(self, inputs, targets):
+        self.optimizer.zero_grad()
+        outputs = self.model(inputs)
+        if isinstance(self.criterion, list):
+            loss = 0
+            for criterion_ in self.criterion:
+                loss += criterion_(outputs, targets)
+        else:
+            loss = self.criterion(outputs, targets)
+        loss.backward()
+        self.optimizer.step()
+        return loss, outputs
+    
+    def _run_test_batch(self, inputs, targets):
+        outputs = self.model(inputs)
+        if isinstance(self.criterion, list):
+            loss = 0
+            for criterion_ in self.criterion:
+                loss += criterion_(outputs, targets)
+        else:
+            loss = self.criterion(outputs, targets)
+        return loss, outputs
+    
+    def _log_images(self, inputs, outputs, targets, epoch, mode):
+        idxs = random.sample(list(np.arange(0, inputs.shape[0])), 2)
+        input_log = inputs[idxs]
+        output_log = outputs[idxs]
+        target_log = targets[idxs]
+        if len(inputs.shape) == 5:
+            input_log = torch.sum(input_log, dim=4)
+            output_log = torch.sum(output_log, dim=4)
+            target_log = torch.sum(target_log, dim=4)
+        images = torch.cat([input_log, output_log, target_log], dim=0)
+        images = make_grid(images, nrow=2, normalize=True)
+        imgs = wandb.Image(images, caption=f"{mode} Step {epoch} Top row: inputs, Middle row: predictions, Bottom row: targets")
+        if mode == 'Train':
+            wandb.log({"Train Images": imgs})
+        elif mode == 'Valid':
+            wandb.log({"Validation Images": imgs})
+        else:
+            wandb.log({"Test Images": imgs})
+    
+    def _run_epoch(self, epoch):
+        self.model.train()
+        b_sz = len(next(iter(self.train_data))[0])
+        print(f"[GPU{self.global_rank}] Epoch {epoch} | Batchsize: {b_sz} | Steps: {len(self.train_data)}")
+        self.train_data.sampler.set_epoch(epoch)
+        running_loss = 0.0
+        for batch in self.train_data:
+            if self.config['dataset'] == 'ALMA':
+                inputs = batch['dirty'][tio.DATA].to(self.local_rank)
+                targets = batch['clean'][tio.DATA].to(self.local_rank)
+            elif self.config['dataset'] == 'EUCLID':
+                inputs = torch.permute(batch['input'][tio.DATA], (0, 4, 2, 3, 1)).to(self.local_rank)
+                targets = torch.permute(batch['target'][tio.DATA], (0, 4, 2, 3, 1)).to(self.local_rank)
+            loss, outputs = self._run_batch(inputs, targets)
+            self.example_ct += len(inputs)
+            if ((self.example_ct + 1) % self.config['log_rate']) == 0:
+                self._log_images(inputs, outputs, targets, epoch, 'Train')
+
+            running_loss += loss.item() * inputs.size(0)
+        epoch_loss = running_loss / len(self.train_data.dataset)
+        return epoch_loss
+    
+    def _run_valid_epoch(self, epoch):
+        self.model.eval()
+        b_sz = len(next(iter(self.valid_data))[0])
+        print(f"[GPU{self.global_rank}] Epoch {epoch} | Batchsize: {b_sz} | Steps: {len(self.valid_data)}")
+        self.valid_data.sampler.set_epoch(epoch)
+        running_loss = 0.0
+        for batch in self.valid_data:
+            if self.config['dataset'] == 'ALMA':
+                inputs = batch['dirty'][tio.DATA].to(self.local_rank)
+                targets = batch['clean'][tio.DATA].to(self.local_rank)
+            elif self.config['dataset'] == 'EUCLID':
+                inputs = torch.permute(batch['input'][tio.DATA], (0, 4, 2, 3, 1)).to(self.local_rank)
+                targets = torch.permute(batch['target'][tio.DATA], (0, 4, 2, 3, 1)).to(self.local_rank)
+            loss, outputs = self._run_batch(inputs, targets)
+            self.example_ct += len(inputs)
+            if ((self.example_ct + 1) % self.config['log_rate']) == 0:
+                self._log_images(inputs, outputs, targets, epoch, 'Validation')
+            running_loss += loss.item() * inputs.size(0)
+        epoch_loss = running_loss / len(self.train_data.dataset)
+        return epoch_loss
+
+    def train(self):
+        self.example_ct = 0
+        self.best_loss = 1e10
+        for epoch in range(self.epochs_run, self.config['epochs']):
+            epoch_loss = self._run_epoch(epoch)
+            wandb.log({'train_loss': epoch_loss})
+            valid_epoch_loss = self._run_valid_epoch(epoch)
+            wandb.log({'valid_loss': valid_epoch_loss})
+            if self.local_rank == 0 and valid_epoch_loss < self.best_loss and epoch % self.save_every == 0:
+                    self.best_loss = valid_epoch_loss
+                    self._save_snapshot(epoch)
+
+            self.epochs_run += 1
+        
+
+def train_multigpu(config):
+    ddp_setup()
+    trainer = Trainer(config)
+    trainer.train()
+    destroy_process_group()
+          
+

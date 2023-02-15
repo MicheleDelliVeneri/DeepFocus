@@ -164,7 +164,7 @@ def get_TNG_dataloaders(data_path, catalogue_path, bands, targets, train_size, t
     training_dataset = create_subjects_dataset(inputs_catalogue, targets_catalogue, train_ids, target_info, targets, bands, training_transforms, mode='Training')
     validation_dataset = create_subjects_dataset(inputs_catalogue, targets_catalogue, val_ids, target_info, targets, bands, validation_transforms, mode='Validation')
     test_dataset = create_subjects_dataset(inputs_catalogue, targets_catalogue, test_ids, target_info, targets, bands, validation_transforms, mode='Test')
-    training_dataloader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    training_dataloader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     validation_dataloader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     return training_dataloader, validation_dataloader, test_dataloader
