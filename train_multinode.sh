@@ -1,8 +1,9 @@
 #!/bin/bash
 
 #SBATCH --job-name=DeepFocus
-#SBATCH -nodes=3
-#SBATCH --ntasks3
+#SBATCH --partition=gpus
+#SBATCH --nodes=3
+#SBATCH --ntasks=3
 #SBATCH --cpus-per-task=4
 #SBATCH --gpus-per-task=2
 
@@ -14,7 +15,7 @@ head_node_ip = $( srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-addres
 echo Node IP: $head_node_ip
 export LOGLEVEL=INFO
 
-srun torchrun \
+srun conda run -n astrodl torchrun \
 --nnodes 3 \
 --nproc_per_node 2 \ # corresponds to the number of gpus per node --gpus-per-task 
 --rdzv_id $RANDOM \
