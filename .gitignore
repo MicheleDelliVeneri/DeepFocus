@@ -129,3 +129,6 @@ dmypy.json
 .pyre/
 *.fits
 test_params.csv
+
+# Weight and biases
+wandb/
