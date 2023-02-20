@@ -1268,14 +1268,22 @@ class Trainer:
     def __init__(self, config: dict) -> None:
         # get the config dictionary
         # get local and global ranks
+        # # understand if the code is run on a single node or a multi-node environment
+        if config['multi_node'] == True:
+            self.global_rank = int(os.environ['RANK'])
+            # Force multi gpu to True
+            config['multi_gpu'] = True
         self.local_rank = int(os.environ['LOCAL_RANK'])
         #self.global_rank = int(os.environ['RANK'])
         # initialize wandb from the config dictionary
-        wandb_run = wandb.init(project=config['project'], entity=config['entity'], name=config['name'], config=config, group=config['group'])
+        if os.path.exists(config['output_path']) == False:
+            os.mkdir(config['output_path'])
+        wandb_run = wandb.init(project=config['project'], entity=config['entity'], name=config['name'], config=config, 
+                                group=config['group'], save_code=True, dir=config['output_path'])
         self.config = wandb_run.config
         self.run_id = wandb_run.id
         self.starting_time = datetime.datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-        self.config['model_name'] = self.config['dataset'] + '_' + self.config['dmode'] + '_' + str(self.run_id) + '_' + self.starting_time
+        self.config['model_name'] = self.config['dataset'] + '_' + self.config['name'] + '_' + self.config['dmode'] + '_' + str(self.run_id) + '_' + self.starting_time
         if config['normalize'] is True:
             training_transforms = tio.Compose([
                         tio.RandomFlip(axes=(0, 1), p=1),
@@ -1339,8 +1347,7 @@ class Trainer:
             
         self.save_every = self.config['save_frequency']
         self.epochs_run = 0
-        if os.path.exists(self.config['output_path']) == False:
-            os.mkdir(self.config['output_path'])
+        
         self.snapshot_path = os.path.join(self.config['output_path'], self.config['project'] + '_' + self.config['model_name'] + str(self.run_id) + '.pt')
         self.woutput_path = os.path.join(self.config['output_path'], self.config['project'] + '_' + self.config['model_name'] + str(self.run_id) + '.onnx')
         if os.path.exists(self.snapshot_path):
@@ -1438,7 +1445,11 @@ class Trainer:
             b_sz = len(next(iter(self.train_data))['input'][tio.DATA])
         self.train_data.sampler.set_epoch(epoch)
         running_loss = 0.0
-        for batch in tqdm(self.train_data, total=len(self.train_data), desc=f"[GPU {self.local_rank}] Epoch {epoch} | Training"):
+        if self.config['multi_node'] == True:
+            gpu_id = self.global_rank
+        else:
+            gpu_id = self.local_rank
+        for batch in tqdm(self.train_data, total=len(self.train_data), desc=f"[GPU {gpu_id}] Epoch {epoch} | Training"):
             if self.config['dataset'] == 'ALMA':
                 inputs = batch['dirty'][tio.DATA].to(self.local_rank)
                 targets = batch['clean'][tio.DATA].to(self.local_rank)
