@@ -1,13 +1,12 @@
-import pprint
 import wandb
-import utils.dl_utils as dl
-import torchio as tio
+wandb.login()
+
+
 
 config = dict(
     project = 'DeepFocus',
     entity = 'almadl',
-    group = 'multigpu',
-    name = 'multigpu_3d_03',
+    name = 'multigpu_3d_01',
     dataset = 'ALMA',
     data_path = '/ibiscostorage/mdelliveneri/ALMA/data/',
     output_path = '/ibiscostorage/mdelliveneri/ALMA/saved_models/',
@@ -16,9 +15,8 @@ config = dict(
     weight_decay = 0.0001,
     learning_rate = 0.0001,
     dropout_rate = 0.0,
-    batch_size = 12,
+    batch_size = 32,
     optimizer = 'Adam',
-    dmode = 'deconvolver',
     block_sizes = [16, 32, 64, 128],
     oblock_sizes = [16, 8, 1],
     kernel_sizes = [(5, 5, 3), (3, 3, 3), (3, 3, 3), (3, 3, 3)],
@@ -37,13 +35,13 @@ config = dict(
     final_activation = 'sigmoid',
     multi_gpu = True,
     log_rate = 1,
-    save_frequency = 1,
     num_workers = 4, 
     num_gpus = 2,
     num_nodes = 1,
-    debug = False,
 )
 
-if __name__ == "__main__":
-    wandb.login()
-    dl.train_multigpu(config)
+
+wandb_run = wandb.init(project=config['project'], entity=config['entity'], name=config['name'], config=config)
+config = wandb_run.config
+run_id = wandb_run.id
+print(run_id)

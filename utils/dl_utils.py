@@ -31,7 +31,7 @@ import datetime
 import matplotlib
 from matplotlib import gridspec
 from math import exp
-import model_utils as mu
+import utils.model_utils as mu
 import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -1269,56 +1269,56 @@ class Trainer:
         # get the config dictionary
         # get local and global ranks
         self.local_rank = int(os.environ['LOCAL_RANK'])
-        self.global_rank = int(os.environ['RANK'])
+        #self.global_rank = int(os.environ['RANK'])
         # initialize wandb from the config dictionary
-        with wandb.init(config, project=config['project'], name=config['name'], entity=config['entity']):
-            self.config = wandb.config
-            self.run_id = wandb.id
-            self.starting_time = datetime.datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-            self.config['model_name'] = self.config['dataset'] + '_' + self.config['dmode'] + '_' + str(self.run_id) + '_' + self.starting_time
-            if config['normalize'] is True:
-                training_transforms = tio.Compose([
+        wandb_run = wandb.init(project=config['project'], entity=config['entity'], name=config['name'], config=config, group=config['group'])
+        self.config = wandb_run.config
+        self.run_id = wandb_run.id
+        self.starting_time = datetime.datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+        self.config['model_name'] = self.config['dataset'] + '_' + self.config['dmode'] + '_' + str(self.run_id) + '_' + self.starting_time
+        if config['normalize'] is True:
+            training_transforms = tio.Compose([
                         tio.RandomFlip(axes=(0, 1), p=1),
                         tio.RandomAffine(scales=0, degrees=(0, 0, 90), translation=0, p=1),
                         tio.CropOrPad((256, 256, 128)),
                         tio.RescaleIntensity((0, 1))
                          ])
-                validation_transforms = tio.Compose([
+            validation_transforms = tio.Compose([
                         tio.CropOrPad((256, 256, 128)),
                         tio.RescaleIntensity((0, 1))])
-            else:
-                training_transforms = tio.Compose([
+        else:
+            training_transforms = tio.Compose([
                         tio.RandomFlip(axes=(0, 1), p=1),
                         tio.RandomAffine(scales=0, degrees=(0, 0, 90), translation=0, p=1),
                         tio.CropOrPad((256, 256, 128))
                         ])
-                validation_transforms = tio.Compose([
+            validation_transforms = tio.Compose([
                         tio.CropOrPad((256, 256, 128))])
-            if self.config['dataset'] == 'ALMA':
-                print('Loading data... for {} model in mode {}'.format(self.config['model_name'], self.config['dmode']))
+        if self.config['dataset'] == 'ALMA':
+            print('Loading data... for {} model in mode {}'.format(self.config['model_name'], self.config['dmode']))
                 
-                self.train_data, self.valid_data = get_ALMA_dataloaders(self.config['data_path'], 
+            self.train_data, self.valid_data = get_ALMA_dataloaders(self.config['data_path'], 
                                             training_transforms,
                                             validation_transforms,
                                             self.config['batch_size'],
                                             self.config['num_workers'], 
                                             self.config['multi_gpu'])
-            elif self.config['dataset'] == 'EUCLID':
-                print('Loading data... for {} model in mode {}'.format(self.config['model_name'], self.config['dmode']))
-                self.train_data, self.valid_data, _ = get_TNG_dataloaders(self.config['data_path'], self.config['catalogue_path'], 
+        elif self.config['dataset'] == 'EUCLID':
+            print('Loading data... for {} model in mode {}'.format(self.config['model_name'], self.config['dmode']))
+            self.train_data, self.valid_data, _ = get_TNG_dataloaders(self.config['data_path'], self.config['catalogue_path'], 
                                                                     self.config['bands'], self.config['targets'], self.config['train_size'],
                                                                     training_transforms, validation_transforms, self.config['batch_size'], self.config['num_workers'])
-            print('Data loaded')
-            if self.config['block'] == 'basic':
-                encoder_block = mu.ResNetBasicBlock
-                decoder_block = mu.ResNetBasicBlock
-            elif self.config['block'] == 'bottleneck':
-                encoder_block = mu.ResNetBottleNeckBlock
-                decoder_block = mu.ResNetBottleNeckBlock
-            else:
-                encoder_block = mu.ResNetBasicBlock
-                decoder_block = mu.ResNetBasicBlock
-            model = mu.DeepFocus(in_channels=config['in_channels'], out_channels=config['out_channels'], 
+        print('Data loaded')
+        if self.config['block'] == 'basic':
+            encoder_block = mu.ResNetBasicBlock
+            decoder_block = mu.ResNetBasicBlock
+        elif self.config['block'] == 'bottleneck':
+            encoder_block = mu.ResNetBottleNeckBlock
+            decoder_block = mu.ResNetBottleNeckBlock
+        else:
+            encoder_block = mu.ResNetBasicBlock
+            decoder_block = mu.ResNetBasicBlock
+        model = mu.DeepFocus(in_channels=config['in_channels'], out_channels=config['out_channels'], 
                  blocks_sizes=config['block_sizes'],
                  oblocks_sizes=config['oblock_sizes'],
                  encoder_kernel_sizes=config['kernel_sizes'],
@@ -1337,36 +1337,41 @@ class Trainer:
                  dmode=config['dmode'],
                  dropout_rate=config['dropout_rate'])
             
-            self.save_every = self.config['save_frequency']
-            self.epochs_run = 0
-            self.snapshot_path = os.path.join(self.config['output_path'], self.config['project_name'] + '_' + self.config['model_name'] + str(self.run_id) + '.pt')
-            self.woutput_path = os.path.join(self.config['output_path'], self.config['project_name'] + '_' + self.config['model_name'] + str(self.run_id) + '.onnx')
-            if os.path.exists(self.snapshot_path):
-                print("Loading snapshot")
-                self._load_snapshot(self.snapshot_path)
-            if os.path.exists(self.snapshot_path) is False:
-                os.mkdir(self.snapshot_path)
+        self.save_every = self.config['save_frequency']
+        self.epochs_run = 0
+        if os.path.exists(self.config['output_path']) == False:
+            os.mkdir(self.config['output_path'])
+        self.snapshot_path = os.path.join(self.config['output_path'], self.config['project'] + '_' + self.config['model_name'] + str(self.run_id) + '.pt')
+        self.woutput_path = os.path.join(self.config['output_path'], self.config['project'] + '_' + self.config['model_name'] + str(self.run_id) + '.onnx')
+        if os.path.exists(self.snapshot_path):
+            print("Loading snapshot")
+            self._load_snapshot(self.snapshot_path)
+    
             
-            if self.local_rank == 0 and self.epoch_run % self.save_every == 0:
-                torch.onnx.export(model, 
-                        torch.randn(self.config['input_shape']).unsqueeze(0).unsqueeze(0).to(device),
-                        self.woutpu_path)
-                wandb.save(self.woutpath, policy='now')
 
-            self.criterion = mu.build_loss(self.config['criterion'], self.config['input_shape'])
-            self.optimizer = mu.build_optimizer(self.config['optimizer'], 
+        self.criterion = mu.build_loss(self.config['criterion'], self.config['input_shape'])
+        self.optimizer = mu.build_optimizer(self.config['optimizer'], 
                                     model, self.config['learning_rate'],
                                     self.config['weight_decay'])
 
 
-            if self.config['multi_gpu'] == True:
-                self.model = model.to(self.local_rank)
-                self.model = DDP(self.model, device_ids=[self.local_rank])
+        if self.config['multi_gpu'] == True:
+            print('Using multiple GPUs')
+            self.model = model.to(self.local_rank)
+            self.model = DDP(self.model, device_ids=[self.local_rank], find_unused_parameters=True)
 
-            else:
-                self.local_rank = device
-                self.model = model.to(self.local_rank)
-            wandb.watch(self.model, self.criterion, log='all', log_freq=self.config['log_rate'])
+        else:
+            print('Using single GPU')
+            self.local_rank = device
+            self.model = model.to(self.local_rank)
+
+        if self.local_rank == 0 and self.epochs_run % self.save_every == 0:
+            torch.onnx.export(model, 
+                    torch.randn(self.config['input_shape']).unsqueeze(0).unsqueeze(0).to(self.local_rank),
+                    self.woutput_path)
+            wandb.save(self.snapshot_path, policy='now')
+        
+        wandb.watch(self.model, self.criterion, log='all', log_freq=self.config['log_rate'])
 
     def _load_snapshot(self, snapshot_path):
         loc = f"cuda:{self.local_rank}"
@@ -1427,11 +1432,13 @@ class Trainer:
     
     def _run_epoch(self, epoch):
         self.model.train()
-        b_sz = len(next(iter(self.train_data))[0])
-        print(f"[GPU{self.global_rank}] Epoch {epoch} | Batchsize: {b_sz} | Steps: {len(self.train_data)}")
+        if self.config['dataset'] == 'ALMA':
+            b_sz = len(next(iter(self.train_data))['dirty'][tio.DATA])
+        elif self.config['dataset'] == 'EUCLID':
+            b_sz = len(next(iter(self.train_data))['input'][tio.DATA])
         self.train_data.sampler.set_epoch(epoch)
         running_loss = 0.0
-        for batch in self.train_data:
+        for batch in tqdm(self.train_data, total=len(self.train_data), desc=f"[GPU {self.local_rank}] Epoch {epoch} | Training"):
             if self.config['dataset'] == 'ALMA':
                 inputs = batch['dirty'][tio.DATA].to(self.local_rank)
                 targets = batch['clean'][tio.DATA].to(self.local_rank)
@@ -1449,11 +1456,14 @@ class Trainer:
     
     def _run_valid_epoch(self, epoch):
         self.model.eval()
-        b_sz = len(next(iter(self.valid_data))[0])
-        print(f"[GPU{self.global_rank}] Epoch {epoch} | Batchsize: {b_sz} | Steps: {len(self.valid_data)}")
+        if self.config['dataset'] == 'ALMA':
+            b_sz = len(next(iter(self.train_data))['dirty'][tio.DATA])
+        elif self.config['dataset'] == 'EUCLID':
+            b_sz = len(next(iter(self.train_data))['input'][tio.DATA])
+        print(f"[GPU{self.local_rank}] Epoch {epoch} | Batchsize: {b_sz} | Steps: {len(self.valid_data)}")
         self.valid_data.sampler.set_epoch(epoch)
         running_loss = 0.0
-        for batch in self.valid_data:
+        for batch in tqdm(self.valid_data, total=len(self.valid_data), desc=f"[GPU {self.local_rank}] Epoch {epoch} | Validation"):
             if self.config['dataset'] == 'ALMA':
                 inputs = batch['dirty'][tio.DATA].to(self.local_rank)
                 targets = batch['clean'][tio.DATA].to(self.local_rank)
@@ -1488,5 +1498,6 @@ def train_multigpu(config):
     trainer = Trainer(config)
     trainer.train()
     destroy_process_group()
+    wandb.finish()
           
 
