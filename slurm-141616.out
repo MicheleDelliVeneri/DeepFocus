@@ -1,0 +1,2 @@
+/var/spool/slurm/job141616/slurm_script: line 10: syntax error near unexpected token `('
+/var/spool/slurm/job141616/slurm_script: line 10: `nodes =( $( scontrol show hostname $SLURM_NODELIST ) ) # get the list of nodes'

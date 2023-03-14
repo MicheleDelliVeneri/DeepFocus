@@ -1,15 +1,15 @@
 #!/bin/bash
 
 #SBATCH --job-name=DeepFocus
-#SBATCH --partition=gpus
+#SBATCH --partition=parallel
 #SBATCH --nodes=3
 #SBATCH --ntasks=3
 #SBATCH --cpus-per-task=4
 #SBATCH --gpus-per-task=2
 
-nodes =( $( scontrol show hostname $SLURM_NODELIST ) ) # get the list of nodes
-nodes_array = ($nodes)
-head_node = ${nodes_array[0]} # get the head node
+nodes=( $( scontrol show hostnames $SLURM_NODELIST ) ) # get the list of nodes
+nodes_array=($nodes)
+head_node=${nodes_array[0]} # get the head node
 head_node_ip = $( srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address ) # get the ip address of the head node
 
 echo Node IP: $head_node_ip
