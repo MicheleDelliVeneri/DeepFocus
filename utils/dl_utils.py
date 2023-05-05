@@ -706,9 +706,6 @@ def get_dataloader(training_path: str, batch_size: int, patch_size: tuple, quequ
     return dataloader
 
 
-
-
-
 def get_ALMA_test_dataloaders(root_dir, tclean_dir, test_transforms=None,
                         batch_size=32,  num_workers=4, get_tclean=False):
     if get_tclean is True:
@@ -1499,7 +1496,11 @@ class Trainer:
             self.global_rank = int(os.environ['RANK'])
             # Force multi gpu to True
             config['multi_gpu'] = True
-        self.local_rank = int(os.environ['LOCAL_RANK'])
+        elif config['multi_gpu'] == True:
+             self.local_rank = int(os.environ['LOCAL_RANK'])
+        else:
+            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            self.local_rank = device
         #self.global_rank = int(os.environ['RANK'])
         # initialize wandb from the config dictionary
         if os.path.exists(config['output_path']) == False:

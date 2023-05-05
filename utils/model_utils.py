@@ -565,7 +565,7 @@ class ResNetDecoder(nn.Module):
                                  dim=self.dim, activation=self.activation) 
               for (in_channels, out_channels, kernel_size) in self.out_block_sizes_kernels])
             self.out = nn.Sequential(
-                nn.Conv1d(self.oblocks_sizes[-1] * self.expansions, self.output_channels, kernel_size=1, padding=0),
+                nn.Conv1d(self.oblocks_sizes[-1] * self.expansion, self.output_channels, kernel_size=1, padding=0),
                 activation_func(final_activation))
             
         elif len(self.input_shape) == 2:
@@ -590,7 +590,7 @@ class ResNetDecoder(nn.Module):
                                  dim=self.dim, activation=self.activation) 
               for (in_channels, out_channels, kernel_size) in self.out_block_sizes_kernels])
             self.out = nn.Sequential(
-                nn.Conv2d(self.oblocks_sizes[-1] * self.expansions, self.output_channels, kernel_size=1, padding=0),
+                nn.Conv2d(self.oblocks_sizes[-1] * self.expansion, self.output_channels, kernel_size=1, padding=0),
                 activation_func(final_activation))
         elif len(self.input_shape) == 3:
             self.dim = 3
@@ -674,7 +674,7 @@ class ResNetRegressor(nn.Module):
         return x
     
 class DeepFocus(nn.Module):
-    def __init__(self, in_channels=3, out_channels=1, blocks_sizes=[64, 128, 256, 512],
+    def __init__(self, in_channels=1, out_channels=1, blocks_sizes=[64, 128, 256, 512],
                  oblocks_sizes=[64, 32, 1],
                  encoder_kernel_sizes=[3, 3, 3, 3],
                  depths = [2, 2, 2, 2],
@@ -690,7 +690,14 @@ class DeepFocus(nn.Module):
                  skip_connections=False,
                  dmode='deconvolver',
                  debug=False,
-                 dropout_rate=0.0, 
+                 dropout_rate=0.0,
+                 scale=None, 
+                 mean=None, 
+                 std=None,
+                 multi_gpu=False,
+                 multi_node=False, 
+                 local_rank=None,
+                 global_rank=None,
                  *args,**kwargs):
         super().__init__()
 
@@ -714,6 +721,18 @@ class DeepFocus(nn.Module):
         self.debug = debug
         self.dmode = dmode
         self.dropout_rate = dropout_rate
+        self.scale = scale
+        self.mean = mean
+        self.std = std
+        self.multi_gpu = multi_gpu
+        self.multi_node = multi_node
+        if self.multi_node == True:
+            self.multi_gpu = True
+        self.global_rank = global_rank
+        self.local_rank = local_rank
+        if self.local_rank == None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.local_rank = device
         self.encoder = ResNetEncoder(in_channels=self.in_channels, 
                                      blocks_sizes=self.encoder_blocks_sizes,
                                      kernel_sizes=self.encoder_kernel_sizes,
@@ -759,7 +778,28 @@ class DeepFocus(nn.Module):
                                            classification=True,
                                            debug=self.debug,
                                            dropout_rate=self.dropout_rate)
-    def forward(self, x):
+    
+    def _get_model_input(self, image, frequency_channels):
+        transformed_image = torch.empty(image.shape)
+        start = frequency_channels[:, 0]
+        stop = frequency_channels[:, 1]
+        for i, (im, start_channel, end_channel) in enumerate(zip(image, start.int(), stop.int())):
+            #trasformed_image[i].permute(*torch.arange(transformed_image[i].ndim - 1, -1, -1))
+            target_image = transformed_image[i].T
+            tr_im = im.T
+            for j, (value_span, mu, sigma) in enumerate(
+                    zip(self.scale[start_channel:end_channel], self.mean[start_channel:end_channel],
+                        self.std[start_channel:end_channel])):
+                target_image[j] = (tr_im[j] - value_span[0]) / (value_span[1] - value_span[0])
+                target_image[j] = torch.clamp(target_image[j], 0., 1.)
+                target_image[j] = (target_image[j] - mu) / sigma
+
+        return transformed_image.float()
+    
+    def forward(self, x, frequency_channels):
+        print(x.shape)
+        x = self._get_model_input(x, frequency_channels).to(self.local_rank)
+        print(x.shape, x.device)
         if self.skip_connections:
             lat, skips = self.encoder(x)
             x = self.decoder(lat, skips)
