@@ -11,6 +11,8 @@ from spectral_cube import SpectralCube
 from astropy.wcs import WCS
 import os
 import utils.model_utils as mu
+import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 class CubeCache:
     def __init__(self, fits_file: str, gradual_loading: bool = True):
@@ -97,7 +99,7 @@ def _partition_indexing(cube_shape, dim, padding, max_batch_size=None):
     #meshes = [meshes[0], meshes[2], meshes[1]]
     upper_lefts = np.stack(list(map(np.ravel, meshes)))
     n_evaluations = upper_lefts.shape[1]
-    if max_batch_size is not None:
+    if max_batch_size != None:
         batch_size = min(max_batch_size, n_evaluations)
     else:
         batch_size = n_evaluations
@@ -145,19 +147,18 @@ def cube_evaluation(cube, dim, padding, position, overlap_slices, overlaps, mode
 
     padding_slices = list()
 
-    for i, ovs in enumerate(overlap_slices):
+    for i, ovs in tqdm(enumerate(overlap_slices), total=len(overlap_slices)):
         model_input[i, 0] = cube[ovs]
         frequency_channels[i, :] = torch.tensor([position[0, -1] + ovs[-1].start,
                                                  position[0, -1] + ovs[-1].stop])
         padd_slices = [slice(int(p + o), int(- p)) for o, p in zip(overlaps[i], padding)]
         padding_slices.append(padd_slices)
 
-    print('Before Eval', model_input.shape, frequency_channels.shape)
+    
     model.eval()
     with torch.no_grad():
         model_out = model(model_input, frequency_channels)
     out = torch.empty(len(overlap_slices), 1, *dim)
-    print('After Eval', out.shape, model_out.shape)
     out[:, :, :, :, :] = model_out.detach().clone()
     del model_out
     torch.cuda.empty_cache()
@@ -223,8 +224,9 @@ class EvaluationTraverser(ModelTraverser):
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
             self.local_rank = device
         self.model_input_dim = model_input_dim
-        header = fits.getheader(fits_path, ignore_blank=True)
-        self.cube_shape = np.array(list(map(lambda x: header[x], ['NAXIS1', 'NAXIS2', 'NAXIS3'])))
+        self.header = fits.getheader(fits_path, ignore_blank=True)
+        self.cube_shape = np.array(list(map(lambda x: self.header[x], ['NAXIS1', 'NAXIS2', 'NAXIS3'])))
+        print('Detected cube shape: ', self.cube_shape)
         self.desired_dim = np.minimum(desired_dim, self.cube_shape)
         self.padding = dl_padding 
         self.n_parallel = n_parallel
@@ -247,8 +249,8 @@ class EvaluationTraverser(ModelTraverser):
         else:
             df = pd.DataFrame()
 
-        for j, slices in enumerate(self.slices_partition):
-            ('Loop {} of {}'.format(str(j), str(len(self.slices_partition))))
+        for j, slices in tqdm(enumerate(self.slices_partition), total=len(self.slices_partition), desc='Looping'):
+            #print('Loop {} of {}'.format(str(j), str(len(self.slices_partition))))
             if j >= self.j_loop:
                 self.data_cache.cache_data(slices)
                 hi_cube_tensor = self.data_cache.get_hi_data()
@@ -295,7 +297,6 @@ class EvaluationTraverser(ModelTraverser):
                 pickle.dump(slices, open(f'{output_path}/slices/{j}.pb', 'wb'))
                 continue
 
-
 def get_statistics(fits_path):
     header = fits.getheader(fits_path, ignore_blank=True)
     cc = CubeCache(fits_path)
@@ -304,11 +305,13 @@ def get_statistics(fits_path):
 
 def get_base_segmenter(fits_path, input_shape, multi_gpu=False, multi_node=False):
     scale, mean, std = get_statistics(fits_path)
-    if multi_node == True:
+    if multi_node is True:
         global_rank = int(os.environ['RANK'])
-        multi_gpu = True
-    elif multi_gpu == True:
         local_rank = int(os.environ['LOCAL_RANK'])
+        multi_gpu = True
+    elif multi_gpu is True and multi_node is False:
+        local_rank = int(os.environ['LOCAL_RANK'])
+        global_rank = None
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         local_rank  = device
@@ -317,7 +320,7 @@ def get_base_segmenter(fits_path, input_shape, multi_gpu=False, multi_node=False
                          global_rank=global_rank, local_rank=local_rank, 
                          multi_gpu=multi_gpu)
     model = model.to(local_rank)
-    if multi_gpu == True:
-        model = nn.DataParallel(model, device_ids=[self.local_rank], find_unused_parameters=True)
+    if multi_gpu is True:
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     return model
 

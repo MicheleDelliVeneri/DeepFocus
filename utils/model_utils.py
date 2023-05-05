@@ -446,24 +446,27 @@ class ResNetDecoderLayer(nn.Module):
     A ResNet decoder layer composed by upsampling and concatenating with a skip connection
     """
     def __init__(self, in_channels, out_channels, kernel_size, block=ResNetBasicBlock, dim=2, activation='relu', *args, **kwargs):
-        super().__init__()
+        super(ResNetDecoderLayer, self).__init__()
         self.dim = dim
         self.activation = activation
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
         if self.dim == 1:
             self.interpolate = Interpolate(scale_factor=2, mode='linear', align_corners=True) 
-            tconv = partial(ConvTran1dAuto, kernel_size=kernel_size)
+            tconv = partial(ConvTran1dAuto, kernel_size=self.kernel_size)
             self.upsample = nn.Sequential(
-                tconv(in_channels, out_channels, stride=2, padding=1, output_padding=1),
+                tconv(self.in_channels, self.out_channels, stride=2, padding=1, output_padding=1),
                 #nn.ConvTranspose2d(in_channels, out_channels, kernel_size=kernel_size, stride=2, padding=1, output_padding=1),
-                nn.BatchNorm1d(out_channels),
-                activation_func(activation)
+                nn.BatchNorm1d(self.out_channels),
+                activation_func(self.activation)
             )
             conv = partial(Conv1dAuto, kernel_size=kernel_size)
         elif self.dim == 2:
             self.interpolate = Interpolate(scale_factor=2, mode='bilinear', align_corners=True)
-            tconv = partial(ConvTran2dAuto, kernel_size=kernel_size)
+            tconv = partial(ConvTran2dAuto, kernel_size=self.kernel_size)
             self.upsample = nn.Sequential(
-                tconv(in_channels, out_channels, stride=2, padding=1, output_padding=1),
+                tconv(self.in_channels, self.out_channels, stride=2, padding=1, output_padding=1),
                 #nn.ConvTranspose2d(in_channels, out_channels, kernel_size=kernel_size, stride=2, padding=1, output_padding=1),
                 nn.BatchNorm2d(out_channels),
                 activation_func(activation)
@@ -471,17 +474,17 @@ class ResNetDecoderLayer(nn.Module):
             conv = partial(Conv2dAuto, kernel_size=kernel_size)
         elif self.dim == 3:
             self.interpolate = Interpolate(scale_factor=2, mode='trilinear', align_corners=True)
-            tconv = partial(ConvTran3dAuto, kernel_size=kernel_size)
+            tconv = partial(ConvTran3dAuto, kernel_size=self.kernel_size)
             self.upsample = nn.Sequential(
                 #nn.ConvTranspose3d(in_channels, out_channels, kernel_size=kernel_size, stride=2, padding=1, output_padding=1),
-                tconv(in_channels, out_channels, stride=2, padding=1, output_padding=1),
-                nn.BatchNorm3d(out_channels),
-                activation_func(activation)
+                tconv(self.in_channels, self.out_channels, stride=2, padding=1, output_padding=1),
+                nn.BatchNorm3d(self.out_channels),
+                activation_func(self.activation)
             )
-            conv = partial(Conv3dAuto, kernel_size=kernel_size)
-        self.block = block(in_channels + out_channels, out_channels, conv, *args, **kwargs, 
+            conv = partial(Conv3dAuto, kernel_size=self.kernel_size)
+        self.block = block(self.in_channels + self.out_channels, self.out_channels, conv, *args, **kwargs, 
                       dim=self.dim, activation=self.activation)
-        self.oblock = block(in_channels, out_channels, conv, *args, **kwargs, 
+        self.oblock = block(self.in_channels, self.out_channels, conv, *args, **kwargs, 
                       dim=self.dim, activation=self.activation)
     def forward(self, x, skip=None):
         #print('Deconder Input ',  x.shape)
@@ -622,10 +625,12 @@ class ResNetDecoder(nn.Module):
         x = self.unflatten(x)
         if self.debug:
             print('After Unflattering: ', x.shape)
-        if self.skip_connections is True:
+
+        if self.skip_connections == True:
             skips = skips[::-1]
         else:
-            skip = [None] * len(self.blocks)
+            skips = [None] * len(self.blocks)
+
         for i,  block, skip in zip(np.arange(len(self.blocks)), self.blocks, skips):
             if self.debug and skip != None:
                 print('Before Decoder Block: ', x.shape, skip.shape)
@@ -784,8 +789,8 @@ class DeepFocus(nn.Module):
         start = frequency_channels[:, 0]
         stop = frequency_channels[:, 1]
         for i, (im, start_channel, end_channel) in enumerate(zip(image, start.int(), stop.int())):
-            #trasformed_image[i].permute(*torch.arange(transformed_image[i].ndim - 1, -1, -1))
-            target_image = transformed_image[i].T
+            target_image = transformed_image[i].permute(*torch.arange(transformed_image[i].ndim - 1, -1, -1))
+            #target_image = transformed_image[i].T
             tr_im = im.T
             for j, (value_span, mu, sigma) in enumerate(
                     zip(self.scale[start_channel:end_channel], self.mean[start_channel:end_channel],
@@ -797,9 +802,7 @@ class DeepFocus(nn.Module):
         return transformed_image.float()
     
     def forward(self, x, frequency_channels):
-        print(x.shape)
         x = self._get_model_input(x, frequency_channels).to(self.local_rank)
-        print(x.shape, x.device)
         if self.skip_connections:
             lat, skips = self.encoder(x)
             x = self.decoder(lat, skips)
