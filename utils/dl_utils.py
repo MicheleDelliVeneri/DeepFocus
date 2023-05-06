@@ -40,6 +40,7 @@ import os
 from itertools import starmap
 from astropy.io.fits import getheader
 from time import strftime, gmtime
+import torch.distributed as dist
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # -----------------------  TNG DATASET DATALOADING UTILS ----------------------- #
@@ -1630,6 +1631,10 @@ def test(config=None):
 
 def ddp_setup():
     torch.distributed.init_process_group(backend='nccl')
+    rank = dist.get_rank()
+    device_id = rank % torch.cuda.device_count()
+    print('Rank: {}, Device ID: {}'.format(rank, device_id))
+    return device_id
     #init_process_group(backend='nccl')
 
 class Trainer:
@@ -1880,20 +1885,12 @@ class Trainer:
             self.epochs_run += 1
         
 class Tester:
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, device_id) -> None:
         self.config = config
-        if config['multi_node'] == True:
-            self.global_rank = int(os.environ['RANK'])
-            # Force multi gpu to True
-            config['multi_gpu'] = True
-        
-        self.local_rank = int(os.environ['LOCAL_RANK'])
-        
         if config['multi_gpu'] == False:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-            self.local_rank = device
-
-        print(self.local_rank)
+            device_id = device
+        self.device_id = device_id
         #self.global_rank = int(os.environ['RANK'])
         # initialize wandb from the config dictionary
         if os.path.exists(config['output_path']) == False:
@@ -1943,8 +1940,9 @@ class Tester:
             
         if self.config['multi_gpu'] == True:
             print('Using multiple GPUs')
-            #self.model = model.to(self.local_rank)
-            self.model = DDP(self.model, device_ids=[np.arange(self.config['num_gpus'])], find_unused_parameters=True)
+            self.model = self.model.to(self.device_id)
+            self.model = DDP(self.model, device_ids=[self.device_id], 
+                             find_unused_parameters=True)
 
         else:
             print('Using single GPU')
@@ -1988,9 +1986,9 @@ class Tester:
         self.inference_time_0 = time()
         for patches_batch in tqdm(self.inference_data, desc='Inference', total=len(self.inference_data), disable=self.local_rank == 0):
             with torch.no_grad():
-                inputs_tensor = patches_batch['dirty'][tio.DATA].to(self.local_rank)
+                inputs_tensor = patches_batch['dirty'][tio.DATA].to(self.device_id)
                 outputs = self.model(inputs_tensor)
-                locations = patches_batch[tio.LOCATION].to(self.local_rank)
+                locations = patches_batch[tio.LOCATION].to(self.device_id)
                 self.aggregator.add_batch(outputs, locations)
         outputs = self.aggregator.get_output_tensor()
         self.inference_time_1 = time()
@@ -2007,13 +2005,13 @@ class Tester:
         self.inference_time_0 = time()
         self.device_ids = list(range(self.config['num_gpus']))
         self.data_loader.sampler.set_epoch(0)
-        print(self.local_rank)
+        print('Device ID:' , self.device_id)
         with torch.no_grad():
-                for patches_batch in tqdm(self.data_loader, desc='Inference', total=len(self.data_loader)):
-                    inputs_tensor = patches_batch['dirty'][tio.DATA].to(self.local_rank)
-                    outputs = self.model(inputs_tensor)
-                    locations = patches_batch[tio.LOCATION].to(self.local_rank) 
-                    self.aggregator.add_batch(outputs, locations)
+            for patches_batch in tqdm(self.data_loader, desc='Inference', total=len(self.data_loader)):
+                inputs_tensor = patches_batch['dirty'][tio.DATA].to(self.device_id)
+                outputs = self.model(inputs_tensor)
+                locations = patches_batch[tio.LOCATION].to(self.device_id) 
+                self.aggregator.add_batch(outputs, locations)
         
         #chunks_aggregated = [self.aggregators[i].get_output_tensor().cpu() for i in range(self.config['num_gpus'])]
         #outputs = torch.cat(chunks_aggregated, dim=2)
@@ -2031,9 +2029,9 @@ class Tester:
 
 def inference_multigpu(config):
     print('Starting Inference')
-    ddp_setup()
+    device_id = ddp_setup()
     print('DDP Setup Complete')
-    inferencer = Tester(config)
+    inferencer = Tester(config, device_id)
     print('Tester Created')
     if config['num_gpus'] > 1:
         inferencer.multi_gpu_inference()
