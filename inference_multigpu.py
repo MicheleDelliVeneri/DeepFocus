@@ -11,10 +11,12 @@ config = dict(
     group = 'multigpu',
     name = 'multigpou_test_02',
     dataset = 'ALMA',
-    inference_path = '/ibiscostorage/mdelliveneri/big_cube/clean_cube_0.fits',
-    output_path = '/ibiscostorage/mdelliveneri/big_cube',
-    plot_path = '/ibiscostorage/mdelliveneri/big_cube/plots/',
-    batch_size = 4,
+    inference_path = '/ibiscostorage/mdelliveneri/load_test_cube.fits',
+    output_path = '/ibiscostorage/mdelliveneri/speed_test',
+    plot_path = '/ibiscostorage/mdelliveneri/speed_test/plots/',
+    batch_size = 8,
+    num_workers = 4, 
+    num_gpus = 2,
     dmode = 'deconvolver',
     block_sizes = [64, 128, 256, 512],
     oblock_sizes = [64, 32, 1],
@@ -36,10 +38,10 @@ config = dict(
     multi_node = False, 
     log_rate = 1,
     save_frequency = 1,
-    num_workers = 4, 
-    num_gpus = 2,
+    
     num_nodes = 1,
     debug = False,
+    identity = False
 )
 
 if __name__ == "__main__":

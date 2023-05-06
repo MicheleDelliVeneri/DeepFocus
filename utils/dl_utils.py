@@ -432,7 +432,9 @@ def ALMAreader(path):
     return data, affine
 
 def ALMABigCubeReader(path ):
-    data = np.nan_to_num(fits.getdata(path)).astype(np.float32)[np.newaxis, :, :, :]
+    data = np.nan_to_num(fits.getdata(path)).astype(np.float32)
+    if len(data.shape) == 3:
+        data = data[np.newaxis, :, :, :]
     affine = np.eye(4)
     return data, affine
 
@@ -577,37 +579,6 @@ def patch_inference_dataloader(path, patch_size, patch_overlap, batch_size, num_
     header = fits.getheader(path, ignore_blank=True)
     cube_shape = np.array(list(map(lambda x: header[x], ['NAXIS1', 'NAXIS2', 'NAXIS3'])))
     if num_gpus > 1:
-        """
-        device_ids = list(range(num_gpus))
-        chunk_size = cube_shape[2] // num_gpus
-        chunk_starts = [i * chunk_size for i in range(num_gpus)]
-        chunk_ends = chunk_starts[1:] + [cube_shape[2]]
-        chunk_coords = list(zip(chunk_starts, chunk_ends))
-        chunk_shape = np.array([cube_shape[0], cube_shape[1], chunk_size])
-
-        samplers = list()
-        for i in range(num_gpus):
-            sample = tio.Subject(
-                dirty=tio.ScalarImage(path, reader=partial(ALMAChunkReader, chunk_coords=chunk_coords[i])),
-            )
-            sampler = tio.data.GridSampler(sample, patch_size, patch_overlap)
-            samplers.append(sampler)
-        aggregators = []
-        for i in range(num_gpus):
-            aggregators.append(tio.inference.GridAggregator(samplers[i]))
-        
-        datasets = []
-        for i in range(num_gpus):
-            dataset = DistributedSampler(samplers[i], num_replicas=num_gpus, rank=0)
-            datasets.append(dataset)
-            
-        
-        dataloaders = []
-        for i in range(num_gpus):
-           dataloaders.append(DataLoader(samplers[i], sampler=datasets[i], batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True,))
-        
-        return dataloaders, samplers, aggregators, chunk_shape
-        """
         sample = tio.Subject(
         dirty=tio.ScalarImage(path, reader=ALMABigCubeReader),
         )
@@ -1915,8 +1886,10 @@ class Tester:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
             device_id = device
         self.device_id = device_id
-        self.starting_time = datetime.datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-        self.dataloading_time_0 = time()
+        if is_main_process():
+            self.starting_time = datetime.datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+            self.dataloading_time_0 = time()
+       
         if self.config['block'] == 'basic':
             encoder_block = mu.ResNetBasicBlock
             decoder_block = mu.ResNetBasicBlock
@@ -1943,7 +1916,8 @@ class Tester:
                  skip_connections=config['skip_connections'],
                  debug=config['debug'],
                  dmode=config['dmode'],
-                 dropout_rate=config['dropout_rate'])
+                 dropout_rate=config['dropout_rate'],
+                 set_identity=config['identity'])
         if self.config['identity'] == True:
             self.model = nn.Identity()
         
@@ -1967,7 +1941,9 @@ class Tester:
         else:
             self.inference_data, self.aggregator = patch_inference_dataloader(self.config['inference_path'], self.config['input_shape'], self.config['patch_overlap'], 
                                                    self.config['batch_size'], self.config['num_workers'], self.config['num_gpus'])
-        self.dataloading_time_1 = time()
+        
+        if is_main_process():
+            self.dataloading_time_1 = time()
         
 
     
@@ -2004,14 +1980,19 @@ class Tester:
         outputs = outputs.cpu().numpy()
         save_fits(self.save_path, outputs, self.header)
         self.output_time_1 = time()
-        print('Data Loaded in {} seconds'.format(strftime("%H:%M:%S", gmtime(self.dataloading_time_1 - self.dataloading_time_0))))
-        print('Inference performend in {} seconds'.format(strftime("%H:%M:%S", gmtime(self.inference_time_1 - self.inference_time_0))))
-        print('Output saved in {} seconds'.format(strftime("%H:%M:%S", gmtime(self.output_time_1 - self.output_time_0))))
+        print('Data Loaded in {} '.format(strftime("%H:%M:%S", gmtime(self.dataloading_time_1 - self.dataloading_time_0))))
+        print('Inference performend in {} '.format(strftime("%H:%M:%S", gmtime(self.inference_time_1 - self.inference_time_0))))
+        print('Output saved in {} '.format(strftime("%H:%M:%S", gmtime(self.output_time_1 - self.output_time_0))))
+        print('Total Time of execution is {} '.format(strftime("%H:%M:%S", gmtime(self.output_time_1 - self.dataloading_time_0))))
 
+    
     def multi_gpu_inference(self):
         torch.cuda.set_device(self.device_id)
         self.model.eval()
-        self.inference_time_0 = time()
+
+        if is_main_process():
+            self.inference_time_0 = time()
+        
         self.data_loader.sampler.set_epoch(0)
         
         print('Device ID:' , self.device_id)
@@ -2021,13 +2002,11 @@ class Tester:
                 outputs = self.model(inputs_tensor)
                 locations = patches_batch[tio.LOCATION].to(self.device_id) 
                 self.aggregator.add_batch(outputs, locations)
-        dist.all_gather_object(self.output_tensor, self.aggregator.get_output_tensor().cpu())
+        dist.barrier()
         #chunks_aggregated = [self.aggregators[i].get_output_tensor().cpu() for i in range(self.config['num_gpus'])]
         #outputs = torch.cat(chunks_aggregated, dim=2)
         if is_main_process():
-            print(self.output_tensor.shape, self.output_tensor[0].shape, self.output_tensor[1].shape)
-            outputs = torch.sum(self.output_tensor, dim=0).numpy()
-            print(outputs.shape)
+            outputs = self.aggregator.get_output_tensor().cpu().numpy()
             self.inference_time_1 = time()
             self.output_time_0 = time()
             save_path = self.config['output_path'] + '/' + self.config['model_name'] + '.fits'
@@ -2035,9 +2014,9 @@ class Tester:
             save_fits(save_path, outputs, header)
             self.output_time_1 = time()
             print('Data Loaded in {} seconds'.format(strftime("%H:%M:%S", gmtime(self.dataloading_time_1 - self.dataloading_time_0))))
-            print('Inference performend in {} seconds'.format(strftime("%H:%M:%S",  gmtime(self.dataloading_time_1 - self.dataloading_time_0))))
+            print('Inference performend in {} seconds'.format(strftime("%H:%M:%S",  gmtime(self.inference_time_1 - self.inference_time_0))))
             print('Output saved in {} seconds'.format(strftime("%H:%M:%S",gmtime(self.output_time_1 - self.output_time_0))))
-            
+            print('Total Time of execution is {} '.format(strftime("%H:%M:%S", gmtime(self.output_time_1 - self.dataloading_time_0))))
         
 
 
@@ -2061,12 +2040,11 @@ def inference_multigpu(config):
     
     inferencer = Tester(config, device_id, output_tensor)
     print('Tester Created')
-    
     if config['num_gpus'] > 1:
-        outputs, time1, time2, time3 = inferencer.multi_gpu_inference()
+        inferencer.multi_gpu_inference()
     else:
         inferencer.inference()
-        
+
     destroy_process_group()
     
 def train_multigpu(config):

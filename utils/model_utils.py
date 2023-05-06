@@ -703,6 +703,7 @@ class DeepFocus(nn.Module):
                  multi_node=False, 
                  local_rank=None,
                  global_rank=None,
+                 set_identity=False,
                  *args,**kwargs):
         super().__init__()
 
@@ -729,6 +730,7 @@ class DeepFocus(nn.Module):
         self.scale = scale
         self.mean = mean
         self.std = std
+        self.set_identity = set_identity
         #self.multi_gpu = multi_gpu
         #self.multi_node = multi_node
         #if self.multi_node == True:
@@ -738,6 +740,7 @@ class DeepFocus(nn.Module):
         #if self.local_rank == None:
         #    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         #    self.local_rank = device
+        self.identity = nn.Identity()
         self.encoder = ResNetEncoder(in_channels=self.in_channels, 
                                      blocks_sizes=self.encoder_blocks_sizes,
                                      kernel_sizes=self.encoder_kernel_sizes,
@@ -803,6 +806,8 @@ class DeepFocus(nn.Module):
     
     def forward(self, x):
         #x = self._get_model_input(x, frequency_channels).to(self.local_rank)
+        if self.set_identity == True:
+            return self.identity(x)
         if self.skip_connections:
             lat, skips = self.encoder(x)
             x = self.decoder(lat, skips)
