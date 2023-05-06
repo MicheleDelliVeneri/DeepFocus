@@ -39,14 +39,13 @@ from torch.distributed import init_process_group, destroy_process_group
 import os
 from itertools import starmap
 from astropy.io.fits import getheader
+from time import strftime, gmtime
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # -----------------------  TNG DATASET DATALOADING UTILS ----------------------- #
 
 def get_header(inFile):
-    hdu_list = fits.open(inFile)
-    header = hdu_list[0].header
-    hdu_list.close()
+    header = fits.getheader(inFile)
     return header
 
 def load_fits(inFile):
@@ -54,6 +53,11 @@ def load_fits(inFile):
     data = hdu_list[0].data
     hdu_list.close()
     return data
+
+def save_fits(outfile, data, header):
+    hdu = fits.PrimaryHDU(data, header=header)
+    hdul = fits.HDUList([hdu])
+    hdul.writeto(outfile, overwrite=True)
 
 def load_catalogue(path):
     df = pd.read_csv(path, sep='\t')
@@ -419,21 +423,29 @@ class ALMADataset(Dataset):
         return focused, targets
 
 def ALMAreader(path):
-    data = np.nan_to_num(fits.getdata(path)).transpose(0, 2, 3, 1).astype(np.float32)
+    #data = np.nan_to_num(fits.getdata(path)).transpose(0, 2, 3, 1).astype(np.float32)
+    data = np.nan_to_num(fits.getdata(path)).astype(np.float32)[np.newaxis, :, :, :]
     #data = np.nan_to_num(fits.getdata(path)).astype(np.float32)
     #print(data.shape)
     affine = np.eye(4)
     return data, affine
 
-def ALMABigCubeReader(path):
+def ALMABigCubeReader(path ):
     data = np.nan_to_num(fits.getdata(path)).astype(np.float32)[np.newaxis, :, :, :]
+    affine = np.eye(4)
+    return data, affine
+
+def ALMAChunkReader(path, chunk_coords):
+    data = np.nan_to_num(fits.getdata(path)).astype(np.float32)[np.newaxis, chunk_coords[0]:chunk_coords[1], :, :]
     affine = np.eye(4)
     return data, affine
 
 def get_ALMA_dataloaders(root_dir, training_transforms=None, validation_transforms=None, 
                         batch_size=32,  num_workers=4, multi_gpu=False):
-    train_dir = root_dir + 'Train'
-    valid_dir = root_dir + 'Validation'
+    #train_dir = root_dir + 'Train'
+    #valid_dir = root_dir + 'Validation'
+    train_dir = root_dir
+    valid_dir = root_dir
     train_dirty_list = np.array(natsorted([
             os.path.join(train_dir, file) for file in os.listdir(train_dir) if 'dirty' in file]))
     train_clean_list = np.array(natsorted([
@@ -558,6 +570,63 @@ def get_big_cube_patches(path, patch_size, patch_overlap, batch_size, num_worker
         dataloader = torch.utils.data.DataLoader(patch_sampler, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     aggregator = tio.inference.GridAggregator(patch_sampler)
     return dataloader, aggregator
+
+
+def patch_inference_dataloader(path, patch_size, patch_overlap, batch_size, num_workers, num_gpus):
+    header = fits.getheader(path, ignore_blank=True)
+    cube_shape = np.array(list(map(lambda x: header[x], ['NAXIS1', 'NAXIS2', 'NAXIS3'])))
+    if num_gpus > 1:
+        """
+        device_ids = list(range(num_gpus))
+        chunk_size = cube_shape[2] // num_gpus
+        chunk_starts = [i * chunk_size for i in range(num_gpus)]
+        chunk_ends = chunk_starts[1:] + [cube_shape[2]]
+        chunk_coords = list(zip(chunk_starts, chunk_ends))
+        chunk_shape = np.array([cube_shape[0], cube_shape[1], chunk_size])
+
+        samplers = list()
+        for i in range(num_gpus):
+            sample = tio.Subject(
+                dirty=tio.ScalarImage(path, reader=partial(ALMAChunkReader, chunk_coords=chunk_coords[i])),
+            )
+            sampler = tio.data.GridSampler(sample, patch_size, patch_overlap)
+            samplers.append(sampler)
+        aggregators = []
+        for i in range(num_gpus):
+            aggregators.append(tio.inference.GridAggregator(samplers[i]))
+        
+        datasets = []
+        for i in range(num_gpus):
+            dataset = DistributedSampler(samplers[i], num_replicas=num_gpus, rank=0)
+            datasets.append(dataset)
+            
+        
+        dataloaders = []
+        for i in range(num_gpus):
+           dataloaders.append(DataLoader(samplers[i], sampler=datasets[i], batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True,))
+        
+        return dataloaders, samplers, aggregators, chunk_shape
+        """
+        sample = tio.Subject(
+        dirty=tio.ScalarImage(path, reader=ALMABigCubeReader),
+        )
+        patch_sampler = tio.data.GridSampler(sample, patch_size, patch_overlap)
+        sampler = DistributedSampler(patch_sampler, drop_last=True)
+        dataloader = DataLoader(patch_sampler, sampler=sampler, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+        patch_aggregator = tio.inference.GridAggregator(patch_sampler)
+        return dataloader, patch_aggregator
+        
+
+    else:
+        sample = tio.Subject(
+        dirty=tio.ScalarImage(path, reader=ALMABigCubeReader),
+        )
+        patch_sampler = tio.data.GridSampler(sample, patch_size, patch_overlap)
+        patch_loader = DataLoader(patch_sampler, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+        patch_aggregator = tio.inference.GridAggregator(patch_sampler)
+        return patch_loader, patch_aggregator
+
+
 
 
 class CubeCache:
@@ -1560,7 +1629,8 @@ def test(config=None):
 
 
 def ddp_setup():
-    init_process_group(backend='nccl')
+    torch.distributed.init_process_group(backend='nccl')
+    #init_process_group(backend='nccl')
 
 class Trainer:
     def __init__(self, config: dict) -> None:
@@ -1571,18 +1641,19 @@ class Trainer:
             self.global_rank = int(os.environ['RANK'])
             # Force multi gpu to True
             config['multi_gpu'] = True
-        elif config['multi_gpu'] == True:
-             self.local_rank = int(os.environ['LOCAL_RANK'])
-        else:
-            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-            self.local_rank = device
-        #self.global_rank = int(os.environ['RANK'])
+       
+        self.local_rank = int(os.environ['LOCAL_RANK'])
         # initialize wandb from the config dictionary
         if os.path.exists(config['output_path']) == False:
             os.mkdir(config['output_path'])
-        
+        wandb_run = wandb.init(project=config['project'], entity=config['entity'], name=config['name'], config=config, 
+                                group=config['group'], save_code=True, dir=config['output_path'])
+        self.config = wandb_run.config
+        self.run_id = wandb_run.id
         self.starting_time = datetime.datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+       
         self.config['model_name'] = self.config['dataset'] + '_' + self.config['name'] + '_' + self.config['dmode'] + '_' + str(self.run_id) + '_' + self.starting_time
+    
         if config['normalize'] is True:
             training_transforms = tio.Compose([
                         tio.RandomFlip(axes=(0, 1), p=1),
@@ -1651,9 +1722,10 @@ class Trainer:
             
         self.save_every = self.config['save_frequency']
         self.epochs_run = 0
-        
+       
         self.snapshot_path = os.path.join(self.config['output_path'], self.config['project'] + '_' + self.config['model_name'] + str(self.run_id) + '.pt')
         self.woutput_path = os.path.join(self.config['output_path'], self.config['project'] + '_' + self.config['model_name'] + str(self.run_id) + '.onnx')
+       
         if os.path.exists(self.snapshot_path):
             print("Loading snapshot")
             self._load_snapshot(self.snapshot_path)
@@ -1669,7 +1741,7 @@ class Trainer:
         if self.config['multi_gpu'] == True:
             print('Using multiple GPUs')
             self.model = model.to(self.local_rank)
-            self.model = DDP(self.model, device_ids=[self.local_rank], find_unused_parameters=True)
+            self.model = DDP(self.model, device_ids=[list(np.arange(self.config['num_gpus']))], find_unused_parameters=True)
 
         else:
             print('Using single GPU')
@@ -1807,19 +1879,21 @@ class Trainer:
 
             self.epochs_run += 1
         
-
-
-class Inferencer:
+class Tester:
     def __init__(self, config: dict) -> None:
+        self.config = config
         if config['multi_node'] == True:
             self.global_rank = int(os.environ['RANK'])
             # Force multi gpu to True
             config['multi_gpu'] = True
-        elif config['multi_gpu'] == True:
-             self.local_rank = int(os.environ['LOCAL_RANK'])
-        else:
+        
+        self.local_rank = int(os.environ['LOCAL_RANK'])
+        
+        if config['multi_gpu'] == False:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
             self.local_rank = device
+
+        print(self.local_rank)
         #self.global_rank = int(os.environ['RANK'])
         # initialize wandb from the config dictionary
         if os.path.exists(config['output_path']) == False:
@@ -1829,12 +1903,7 @@ class Inferencer:
         self.config = wandb_run.config
         self.run_id = wandb_run.id
         self.starting_time = datetime.datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-        self.config['model_name'] = self.config['dataset'] + '_' + self.config['name'] + '_' + self.config['dmode'] + '_' + str(self.run_id) + '_' + self.starting_time
-        self.inference_data, self.aggregator = get_big_cube_patches(self.config['inference_path'], self.config['input_shape'], self.config['patch_overlap'], 
-                                                   self.config['batch_size'], self.config['num_workers'], self.config['multi_gpu'])
-        self.header = get_header(self.config['inference_path'])
-        
-        print('Data loaded')
+        self.dataloading_time_0 = time()
         if self.config['block'] == 'basic':
             encoder_block = mu.ResNetBasicBlock
             decoder_block = mu.ResNetBasicBlock
@@ -1844,7 +1913,7 @@ class Inferencer:
         else:
             encoder_block = mu.ResNetBasicBlock
             decoder_block = mu.ResNetBasicBlock
-        model = mu.DeepFocus(in_channels=config['in_channels'], out_channels=config['out_channels'], 
+        self.model = mu.DeepFocus(in_channels=config['in_channels'], out_channels=config['out_channels'], 
                  blocks_sizes=config['block_sizes'],
                  oblocks_sizes=config['oblock_sizes'],
                  encoder_kernel_sizes=config['kernel_sizes'],
@@ -1862,31 +1931,42 @@ class Inferencer:
                  debug=config['debug'],
                  dmode=config['dmode'],
                  dropout_rate=config['dropout_rate'])
-            
-        #self.save_every = self.config['save_frequency']
-        #self.epochs_run = 0
-        
+
+        print('Number of available GPUs: ', torch.cuda.device_count())
+        self.config['model_name'] = self.config['dataset'] + '_' + self.config['name'] + '_' + self.config['dmode'] + '_' + str(self.run_id) + '_' + self.starting_time
+        self.save_path = os.path.join(self.config['output_path'], self.config['project'] + '_' + self.config['model_name'] + str(self.run_id) + '.fits')
         self.snapshot_path = os.path.join(self.config['output_path'], self.config['project'] + '_' + self.config['model_name'] + str(self.run_id) + '.pt')
         self.woutput_path = os.path.join(self.config['output_path'], self.config['project'] + '_' + self.config['model_name'] + str(self.run_id) + '.onnx')
         if os.path.exists(self.snapshot_path):
             print("Loading snapshot")
             self._load_snapshot(self.snapshot_path)
             
-        self.criterion = mu.build_loss(self.config['criterion'], self.config['input_shape'])
-        self.optimizer = mu.build_optimizer(self.config['optimizer'], 
-                                    model, self.config['learning_rate'],
-                                    self.config['weight_decay'])
-
         if self.config['multi_gpu'] == True:
             print('Using multiple GPUs')
-            self.model = model.to(self.local_rank)
-            self.model = DDP(self.model, device_ids=[self.local_rank], find_unused_parameters=True)
+            #self.model = model.to(self.local_rank)
+            self.model = DDP(self.model, device_ids=[np.arange(self.config['num_gpus'])], find_unused_parameters=True)
 
         else:
             print('Using single GPU')
             self.local_rank = device
-            self.model = model.to(self.local_rank)
+            self.model = self.model.to(self.local_rank)
+        print('Loading Data')
+        
+        if config['multi_gpu'] == True:
+            self.data_loader, self.aggregator = patch_inference_dataloader(self.config['inference_path'], self.config['input_shape'], self.config['patch_overlap'], 
+                                                   self.config['batch_size'], self.config['num_workers'], self.config['num_gpus'])
+        else:
+            self.inference_data, self.aggregator = patch_inference_dataloader(self.config['inference_path'], self.config['input_shape'], self.config['patch_overlap'], 
+                                                   self.config['batch_size'], self.config['num_workers'], self.config['num_gpus'])
+        self.header = get_header(self.config['inference_path'])
+        self.dataloading_time_1 = time()
 
+
+        
+            
+        #self.save_every = self.config['save_frequency']
+        #self.epochs_run = 0
+        
 
     def _load_snapshot(self, snapshot_path):
         loc = f"cuda:{self.local_rank}"
@@ -1903,28 +1983,62 @@ class Inferencer:
         torch.save(snapshot, self.snapshot_path)
         print(f"Epoch {epoch} | Training snapshot saved at {self.snapshot_path}") 
 
-    def _run_batch(self, inputs):
-        outputs = self.model(inputs)
-        return outputs
-    
     def inference(self):
-        with torch.no_grad():
-           for patches_batch in tqdm(self.inference_data, desc='Inference', total=len(self.inference_data)):
+        self.model.eval()
+        self.inference_time_0 = time()
+        for patches_batch in tqdm(self.inference_data, desc='Inference', total=len(self.inference_data), disable=self.local_rank == 0):
+            with torch.no_grad():
                 inputs_tensor = patches_batch['dirty'][tio.DATA].to(self.local_rank)
-                outputs = self._run_batch(patches_batch)
+                outputs = self.model(inputs_tensor)
                 locations = patches_batch[tio.LOCATION].to(self.local_rank)
                 self.aggregator.add_batch(outputs, locations)
         outputs = self.aggregator.get_output_tensor()
+        self.inference_time_1 = time()
+        self.output_time_0 = time()
+        outputs = outputs.cpu().numpy()
+        save_fits(self.save_path, outputs, self.header)
+        self.output_time_1 = time()
+        print('Data Loaded in {} seconds'.format(strftime("%H:%M:%S", gmtime(self.dataloading_time_1 - self.dataloading_time_0))))
+        print('Inference performend in {} seconds'.format(strftime("%H:%M:%S", gmtime(self.inference_time_1 - self.inference_time_0))))
+        print('Output saved in {} seconds'.format(strftime("%H:%M:%S", gmtime(self.output_time_1 - self.output_time_0))))
 
-        return outputs
-         
+    def multi_gpu_inference(self):
+        self.model.eval()
+        self.inference_time_0 = time()
+        self.device_ids = list(range(self.config['num_gpus']))
+        self.data_loader.sampler.set_epoch(0)
+        print(self.local_rank)
+        with torch.no_grad():
+                for patches_batch in tqdm(self.data_loader, desc='Inference', total=len(self.data_loader)):
+                    inputs_tensor = patches_batch['dirty'][tio.DATA].to(self.local_rank)
+                    outputs = self.model(inputs_tensor)
+                    locations = patches_batch[tio.LOCATION].to(self.local_rank) 
+                    self.aggregator.add_batch(outputs, locations)
+        
+        #chunks_aggregated = [self.aggregators[i].get_output_tensor().cpu() for i in range(self.config['num_gpus'])]
+        #outputs = torch.cat(chunks_aggregated, dim=2)
+        outputs = self.aggregator.get_output_tensor()
+        print(outputs.shape)
+        self.inference_time_1 = time()
+        self.output_time_0 = time()
+        outputs = outputs.cpu().numpy()
+        save_fits(self.save_path, outputs, self.header)
+        self.output_time_1 = time()
+        print('Data Loaded in {} seconds'.format(strftime("%H:%M:%S", gmtime(self.dataloading_time_1 - self.dataloading_time_0))))
+        print('Inference performend in {} seconds'.format(strftime("%H:%M:%S", gmtime(self.inference_time_1 - self.inference_time_0))))
+        print('Output saved in {} seconds'.format(strftime("%H:%M:%S", gmtime(self.output_time_1 - self.output_time_0))))
 
 
 def inference_multigpu(config):
+    print('Starting Inference')
     ddp_setup()
-    inferencer = Inferencer(config)
-    inferencer.inferece()
-
+    print('DDP Setup Complete')
+    inferencer = Tester(config)
+    print('Tester Created')
+    if config['num_gpus'] > 1:
+        inferencer.multi_gpu_inference()
+    else:
+        inferencer.inference()
     destroy_process_group()
     
 def train_multigpu(config):

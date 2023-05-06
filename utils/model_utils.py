@@ -729,15 +729,15 @@ class DeepFocus(nn.Module):
         self.scale = scale
         self.mean = mean
         self.std = std
-        self.multi_gpu = multi_gpu
-        self.multi_node = multi_node
-        if self.multi_node == True:
-            self.multi_gpu = True
-        self.global_rank = global_rank
-        self.local_rank = local_rank
-        if self.local_rank == None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self.local_rank = device
+        #self.multi_gpu = multi_gpu
+        #self.multi_node = multi_node
+        #if self.multi_node == True:
+        #    self.multi_gpu = True
+        #self.global_rank = global_rank
+        #self.local_rank = local_rank
+        #if self.local_rank == None:
+        #    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        #    self.local_rank = device
         self.encoder = ResNetEncoder(in_channels=self.in_channels, 
                                      blocks_sizes=self.encoder_blocks_sizes,
                                      kernel_sizes=self.encoder_kernel_sizes,
@@ -801,8 +801,8 @@ class DeepFocus(nn.Module):
 
         return transformed_image.float()
     
-    def forward(self, x, frequency_channels):
-        x = self._get_model_input(x, frequency_channels).to(self.local_rank)
+    def forward(self, x):
+        #x = self._get_model_input(x, frequency_channels).to(self.local_rank)
         if self.skip_connections:
             lat, skips = self.encoder(x)
             x = self.decoder(lat, skips)
